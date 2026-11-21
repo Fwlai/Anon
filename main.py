@@ -55,20 +55,36 @@ async def allocate_alias(uid):
     current = await get_user(uid)
     if current:
         return current, False
-    for _ in range(1600):
-        alias = f"{random.choice(COLORS)}-{random.randrange(100):02d}"
-        try:
-            rows = await db_post("anon_users", {"telegram_user_id": uid, "alias": alias})
-            if rows:
-                return rows[0], True
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code != 409:
-                raise
-            current = await get_user(uid)
-            if current:
-                return current, False
-    raise RuntimeError("Alias pool exhausted")
 
+    for refresh in range(4):
+        occupied = set()
+        offset = 0
+        while True:
+            page = await db_get("anon_users", {"select": "alias", "order": "alias.asc", "limit": "1000", "offset": str(offset)})
+            occupied.update(row["alias"].lower() for row in page)
+            if len(page) < 1000:
+                break
+            offset += 1000
+        candidates = [
+            f"{color}-{number:02d}"
+            for color in COLORS
+            for number in range(100)
+            if f"{color}-{number:02d}".lower() not in occupied
+        ]
+        random.shuffle(candidates)
+        for alias in candidates:
+            try:
+                rows = await db_post("anon_users", {"telegram_user_id": uid, "alias": alias})
+                if rows:
+                    return rows[0], True
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 409:
+                    raise
+                current = await get_user(uid)
+                if current:
+                    return current, False
+                break
+    raise RuntimeError("Alias pool exhausted")
 async def set_block(uid, field, value):
     await db_patch("anon_users", {"telegram_user_id": f"eq.{uid}"}, {field: value})
 
@@ -246,7 +262,7 @@ async def webhook(request: Request):
             if update_id is not None:
                 await unmark_update(update_id)
             raise HTTPException(status_code=503, detail="alias allocation failed")
-    if text != "/unblock":
+    if text not in {"/block", "/unblock"}:
         try:
             if not await rate_ok(uid):
                 return {"ok": True}
