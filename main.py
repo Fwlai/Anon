@@ -122,8 +122,13 @@ async def admin_command(message):
         alias = match.group(1).lower()
         rows = await db_get("anon_users", {"alias": f"ilike.{alias}", "select": "*"})
         if rows:
-            await set_block(rows[0]["telegram_user_id"], "blocked_by_admin", False)
-            await send_user(ADMIN_ID, f"Unblocked: {rows[0]['alias']}")
+            target = rows[0]
+            await set_block(target["telegram_user_id"], "blocked_by_admin", False)
+            try:
+                await send_user(target["telegram_user_id"], "You are unblocked by Fwlai")
+            except Exception:
+                log.info("Unblock notice could not be delivered")
+            await send_user(ADMIN_ID, f"Unblocked: {target['alias']}")
         else:
             await send_user(ADMIN_ID, "Alias not found.")
         return True
