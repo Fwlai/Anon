@@ -275,10 +275,20 @@ async def startup():
     if all([BOT_TOKEN, ADMIN_ID, WEBHOOK_SECRET, SUPABASE_URL, SUPABASE_KEY]):
         try:
             await db_get("anon_users", {"select": "telegram_user_id", "limit": "1"})
-            await send_user(ADMIN_ID, "Anon started.")
-            log.info("Startup check passed")
+            base_url = os.getenv("RENDER_EXTERNAL_URL", "https://anon-mr5s.onrender.com").rstrip("/")
+            await tg("setWebhook", {
+                "url": f"{base_url}/telegram/webhook",
+                "secret_token": WEBHOOK_SECRET,
+                "allowed_updates": ["message", "edited_message"]
+            })
+            await send_user(ADMIN_ID, "Anon started. Webhook is configured.")
+            log.info("Startup check and webhook setup passed")
         except Exception:
-            log.exception("Startup check failed")
+            log.exception("Startup or webhook setup failed")
+            try:
+                await send_user(ADMIN_ID, "Anon startup/webhook setup failed. Check Render logs.")
+            except Exception:
+                pass
     else:
         log.warning("Environment variables are not configured yet")
 
