@@ -244,18 +244,16 @@ async def webhook(request: Request):
                 if recipient and not recipient.get("blocked_by_admin"):
                     payload = {"chat_id": recipient_id, "from_chat_id": ADMIN_ID, "message_id": message["message_id"]}
                     if mapping.get("user_message_id"):
-                        payload["reply_to_message_id"] = mapping["user_message_id"]
+                        payload["reply_parameters"] = {"message_id": mapping["user_message_id"]}
                     try:
                         await tg("copyMessage", payload)
                         await react_status(ADMIN_ID, message["message_id"], True)
                     except Exception:
                         await react_status(ADMIN_ID, message["message_id"], False)
-                        await react_status(recipient_id, mapping.get("user_message_id"), False)
                         log.info("Admin reply delivery failed")
                         if update_id is not None:
                             await unmark_update(update_id)
                         raise HTTPException(status_code=503, detail="reply delivery failed")
-                    await react_status(recipient_id, mapping.get("user_message_id"), True)
         return {"ok": True}
 
     text = message.get("text", "")
