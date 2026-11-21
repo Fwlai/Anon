@@ -163,10 +163,16 @@ async def technical(text, reply_markup=None):
     if reply_markup is not None: payload["reply_markup"]=reply_markup
     await tg("sendMessage",payload)
 
-async def notification(user,m,kind):
-    alias=html.escape(user["alias"])
-    preview=html.escape(re.sub(r"\s+"," ",m.get("text") or "")[:450]) if kind=="text" else f"[{html.escape(kind)}]"
-    await send_user(ADMIN_ID,f'<blockquote>New message from: <code>{alias}</code>\n<span class="tg-spoiler">{preview}</span></blockquote>',"HTML")
+async def edit_incoming_copy(m):
+    uid=m["from"]["id"]
+    rows=await db_get("anon_message_map",{"sender_user_id":f"eq.{uid}","user_message_id":f"eq.{m['message_id']}","select":"*"})
+    if not rows:
+        return
+    admin_mid=rows[0]["admin_message_id"]
+    if "text" in m:
+        await tg("editMessageText",{"chat_id":ADMIN_ID,"message_id":admin_mid,"text":m.get("text","")})
+    else:
+        await tg("editMessageCaption",{"chat_id":ADMIN_ID,"message_id":admin_mid,"caption":m.get("caption","")})
 
 async def relay_live(m,user,reply_to=None):
     uid=m["from"]["id"]; now=datetime.now(timezone.utc)
@@ -258,8 +264,7 @@ async def inbox(page,cmdid):
             count=counts.get(uid,0); badge=f" · <b>{count} new</b>" if count else ""
             lines.append(f"{n}. <code>{html.escape(u['alias'])}</code>{badge}")
     lines.append("\nOpen: <code>/i Alias</code> · Close: <code>/c</code>")
-    keyboard={"keyboard":[[{"text":"«","style":"primary"},{"text":str(page)},{"text":"»","style":"primary"}]],"resize_keyboard":True,"is_persistent":True}
-    await technical("\n".join(lines),keyboard)
+    await technical("\n".join(lines),{"remove_keyboard":True})
 
 async def route_admin(m):
     text=m.get("text","")
