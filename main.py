@@ -171,6 +171,8 @@ async def relay_to_admin(message, user):
     await db_post("anon_admin_sessions", {"sender_user_id": uid, "last_message_at": now.isoformat()}, "resolution=merge-duplicates,return=minimal")
     await react(uid, message["message_id"], "👍")
 
+app = FastAPI()
+
 @app.get("/")
 async def root():
     return {"service": "Anon", "status": "running"}
