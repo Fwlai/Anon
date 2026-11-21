@@ -3,11 +3,12 @@
 Minimal anonymous Telegram message relay.
 
 ## Features
-- Permanent unique aliases in the `Color-00` to `Color-99` style, drawn from 16 colors (1600 total)
+- Permanent unique aliases in the `Color-00` to `Color-99` style, drawn from 40 colors (4000 total)
+- Admin alias headers are displayed as Telegram quoted blocks, with aliases in monospace
 - First-time `/start` reaction only; returning `/start` is silent
 - User-to-admin anonymous message delivery using Telegram copyMessage
 - Reply mapping so admin replies to copied messages reach the original sender
-- User/admin block and unblock commands
+- Admin can block/unblock aliases; users do not have block/unblock commands
 - Admin alias headers separated from messages, repeated after 10 minutes of inactivity
 - Severe burst throttling
 - Webhook secret validation and duplicate-update tracking
