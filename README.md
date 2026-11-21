@@ -1,18 +1,27 @@
 # Anon
 
-Minimal anonymous Telegram message relay.
+Anonymous Telegram relay with an admin-only inbox and chat switching.
 
 ## Features
-- Permanent unique aliases in the `Color-00` to `Color-99` style, drawn from 40 colors (4000 total)
-- Admin alias headers are displayed as Telegram quoted blocks, with aliases in monospace
-- First-time `/start` reaction only; returning `/start` is silent
-- User-to-admin anonymous message delivery using Telegram copyMessage
-- Reply mapping so admin replies to copied messages reach the original sender
+- Permanent unique color aliases (40 colors × 100 numbers)
+- Admin inbox: `/i` shows recent chats and unread counts, with pagination via `/i 2`
+- Open a conversation with `/i Alias`; close the selected chat with `/c`
+- New-message notifications hide text previews behind Telegram spoilers and use media labels (image, album, video, voice, GIF, file, etc.)
+- Incoming messages are copied into the admin chat only when the conversation is open; otherwise they remain unread until opened
+- Reply mapping is preserved for copies of both inbound and outbound messages, allowing replies to target the exact counterpart message
+- Switching chats does not erase unread messages or previous message mappings
+- No positive delivery reactions; only a dislike is used when a message cannot be transferred or a requested alias is invalid
+- User messages are not archived as text in the database; only Telegram message IDs, routing metadata, unread state, aliases, and activity are stored
 - Admin can block/unblock aliases; users do not have block/unblock commands
-- Admin alias headers separated from messages, repeated after 10 minutes of inactivity
-- Severe burst throttling
-- Webhook secret validation and duplicate-update tracking
-- No message body archive; only alias/user state, message ID mappings, and minimal operational metadata
+- Severe burst throttling, webhook secret validation, and update deduplication
+- HTTP request logging suppressed to avoid exposing bot-token URLs
+
+## Commands (admin only)
+- `/i` — inbox
+- `/i 2` — next inbox page
+- `/i Alias` — open/switch chat and deliver unread messages
+- `/c` — close current chat
+- `/block Alias` and `/unblock Alias` — moderation
 
 ## Required environment variables
 - `TELEGRAM_BOT_TOKEN`
@@ -22,10 +31,8 @@ Minimal anonymous Telegram message relay.
 - `SUPABASE_SERVICE_ROLE_KEY`
 
 ## Deploy
-Render Web Service, Python runtime:
+Render web service:
 - Build: `pip install -r requirements.txt`
 - Start: `uvicorn main:app --host 0.0.0.0 --port $PORT`
 
-On startup, the service automatically registers the Telegram webhook at `/telegram/webhook` using `TELEGRAM_WEBHOOK_SECRET`. No manual webhook setup is needed after environment variables are added. The service provides `/` and `/health`.
-
-Note: Telegram Bot API cannot provide reliable reaction-update mirroring from the admin's reaction on the copied message, so that feature is not implemented.
+The webhook is registered on startup. The service exposes `/` and `/health`.
