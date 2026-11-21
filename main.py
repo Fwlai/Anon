@@ -160,7 +160,7 @@ async def technical(text):
 
 async def notification(user,m,kind):
     alias=html.escape(user["alias"])
-    preview=html.escape((m.get("text") or "")[:450]) if kind=="text" else f"[{html.escape(kind)}]"
+    preview=html.escape(re.sub(r"\\s+"," ",m.get("text") or "")[:450] if kind=="text" else f"[{html.escape(kind)}]"
     await send_user(ADMIN_ID,f'<blockquote>New message from: <code>{alias}</code>\n<span class="tg-spoiler">{preview}</span></blockquote>',"HTML")
 
 async def relay_live(m,user,reply_to=None):
