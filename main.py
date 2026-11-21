@@ -213,7 +213,7 @@ async def handle_user(m,user):
     group=[]
     if m.get("media_group_id"):
         group=await db_get("anon_inbox_items",{"user_id":f"eq.{uid}","media_group_id":f"eq.{m['media_group_id']}","select":"id","limit":"10"})
-    if not group or len(group)<=1: await notification(user,m,kind)
+    # inbox retrieval is manual via /i Alias
 
 async def send_to_user(m,uid,reply_to=None):
     p={"chat_id":uid,"from_chat_id":ADMIN_ID,"message_id":m["message_id"]}
@@ -263,12 +263,6 @@ async def inbox(page,cmdid):
 
 async def route_admin(m):
     text=m.get("text","")
-    if text in {"«","»"}:
-        state=await admin_state(); page=int(state.get("inbox_page") or 1)
-        page=max(1,page-1) if text=="«" else page+1
-        await set_inbox_page(page)
-        await inbox(page,m["message_id"])
-        return
     state=await admin_state()
     if text.isdigit() and int(text)==int(state.get("inbox_page") or 1): return
     if text.startswith("/"):
@@ -312,12 +306,12 @@ async def admin_command(message):
     match=re.fullmatch(r"/i(?:@\w+)?(?:\s+(.+))?\s*",text,re.I)
     if match:
         arg=(match.group(1) or "").strip()
-        if not arg: await set_inbox_page(1); await inbox(1,message["message_id"])
+        if not arg: await technical("Inbox list disabled. Use <code>/i Alias</code> to open a conversation.",{"remove_keyboard":True})
         elif re.fullmatch(r"[A-Za-z]+-\d{2}",arg): await open_alias(arg,message["message_id"])
         else: await react(ADMIN_ID,message["message_id"],"👎")
         return True
     if re.fullmatch(r"/c(?:@\w+)?\s*",text,re.I):
-        await set_active(None); await technical("Chat closed. Incoming messages will appear as notifications.")
+        await set_active(None); await technical("Chat closed.",{"remove_keyboard":True})
         return True
     match = re.fullmatch(r"/block(?:@\w+)?\s+([A-Za-z]+-\d{2})\s*", text, re.I)
     if match:
@@ -399,7 +393,8 @@ async def webhook(request: Request):
         except Exception:
             log.exception("Update deduplication failed")
             raise HTTPException(status_code=503, detail="temporary failure")
-    message = update.get("message") or update.get("edited_message")
+    edited = update.get("edited_message")
+    message = update.get("message") or edited
     if not message:
         return {"ok": True}
     sender = message.get("from") or {}
@@ -416,6 +411,12 @@ async def webhook(request: Request):
             raise HTTPException(status_code=503, detail="admin routing failed")
         return {"ok": True}
 
+    if edited:
+        try:
+            await edit_incoming_copy(message)
+        except Exception:
+            log.exception("Incoming edit relay failed")
+        return {"ok": True}
     text = message.get("text", "")
     if text == "/start":
         existing = await get_user(uid)
