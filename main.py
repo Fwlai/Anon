@@ -40,11 +40,18 @@ async def db_patch(table, params, payload):
     return r.json() if r.content else []
 
 async def tg(method, payload):
-    r = await client.post(f"{API}/{method}", json=payload)
-    r.raise_for_status()
-    data = r.json()
+    try:
+        r = await client.post(f"{API}/{method}", json=payload)
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Telegram API {method} transport failed ({type(exc).__name__})") from None
+    if r.status_code >= 400:
+        raise RuntimeError(f"Telegram API {method} returned HTTP {r.status_code}")
+    try:
+        data = r.json()
+    except ValueError:
+        raise RuntimeError(f"Telegram API {method} returned an invalid response") from None
     if not data.get("ok"):
-        raise RuntimeError(f"Telegram {method} rejected the request")
+        raise RuntimeError(f"Telegram API {method} returned an error")
     return data.get("result")
 
 async def get_user(uid):
@@ -88,8 +95,11 @@ async def allocate_alias(uid):
 async def set_block(uid, field, value):
     await db_patch("anon_users", {"telegram_user_id": f"eq.{uid}"}, {field: value})
 
-async def send_user(uid, text):
-    return await tg("sendMessage", {"chat_id": uid, "text": text})
+async def send_user(uid, text, parse_mode=None):
+    payload = {"chat_id": uid, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    return await tg("sendMessage", payload)
 
 async def react(chat_id, message_id, emoji):
     try:
@@ -115,7 +125,7 @@ async def admin_command(message):
             await send_user(target["telegram_user_id"], "You blocked by Fwlai")
         except Exception:
             log.info("Blocked notice could not be delivered")
-        await send_user(ADMIN_ID, f"You blocked: <code>{target['alias']}</code>")
+        await send_user(ADMIN_ID, f"You blocked: <code>{target['alias']}</code>", "HTML")
         return True
     match = re.fullmatch(r"/unblock(?:@\w+)?\s+([A-Za-z]+-\d{2})\s*", text, re.I)
     if match:
@@ -128,26 +138,9 @@ async def admin_command(message):
                 await send_user(target["telegram_user_id"], "You are unblocked by Fwlai")
             except Exception:
                 log.info("Unblock notice could not be delivered")
-            await send_user(ADMIN_ID, f"Unblocked: <code>{target['alias']}</code>")
+            await send_user(ADMIN_ID, f"Unblocked: <code>{target['alias']}</code>", "HTML")
         else:
             await send_user(ADMIN_ID, "Alias not found.")
-        return True
-    return False
-
-async def user_command(message, user):
-    uid = message["from"]["id"]
-    text = message.get("text", "")
-    if text == "/block":
-        await set_block(uid, "blocked_admin", True)
-        await send_user(ADMIN_ID, f"You blocked by: {user['alias']}")
-        await send_user(uid, "You blocked Fwlai use /unblock to unblock")
-        return True
-    if text == "/unblock":
-        if not user.get("blocked_admin"):
-            await react(uid, message["message_id"], "👎")
-        else:
-            await set_block(uid, "blocked_admin", False)
-            await send_user(uid, "You unblocked Fwlai")
         return True
     return False
 
@@ -232,7 +225,7 @@ async def webhook(request: Request):
             rows = await db_get("anon_message_map", {"admin_message_id": f"eq.{reply['message_id']}", "select": "*"})
             if rows:
                 recipient = await get_user(rows[0]["sender_user_id"])
-                if recipient and not recipient.get("blocked_admin") and not recipient.get("blocked_by_admin"):
+                if recipient and not recipient.get("blocked_by_admin"):
                     try:
                         await tg("copyMessage", {"chat_id": recipient["telegram_user_id"], "from_chat_id": ADMIN_ID, "message_id": message["message_id"]})
                     except Exception:
@@ -277,7 +270,7 @@ async def webhook(request: Request):
         raise HTTPException(status_code=503, detail="rate limit unavailable")
     if is_command(text):
         return {"ok": True}
-    if user.get("blocked_admin") or user.get("blocked_by_admin"):
+    if user.get("blocked_by_admin"):
         return {"ok": True}
     try:
         await relay_to_admin(message, user)
