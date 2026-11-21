@@ -25,6 +25,6 @@ Render Web Service, Python runtime:
 - Build: `pip install -r requirements.txt`
 - Start: `uvicorn main:app --host 0.0.0.0 --port $PORT`
 
-Set Telegram webhook URL to `/telegram/webhook` and use the same secret as `TELEGRAM_WEBHOOK_SECRET`. The service provides `/` and `/health`.
+On startup, the service automatically registers the Telegram webhook at `/telegram/webhook` using `TELEGRAM_WEBHOOK_SECRET`. No manual webhook setup is needed after environment variables are added. The service provides `/` and `/health`.
 
 Note: Telegram Bot API cannot provide reliable reaction-update mirroring from the admin's reaction on the copied message, so that feature is not implemented.
