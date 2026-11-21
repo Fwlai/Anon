@@ -221,6 +221,7 @@ async def open_alias(alias,cmdid):
     if not u or u.get("blocked_by_admin"):
         await react(ADMIN_ID,cmdid,"👎"); return
     uid=u["telegram_user_id"]; await set_active(uid); await activity(uid)
+    await technical(f"Chat: <code>{html.escape(u['alias'])}</code>")
     pending=await db_get("anon_inbox_items",{"user_id":f"eq.{uid}","unread":"eq.true","select":"*","order":"created_at.asc","limit":"100"})
     ok=fail=0
     for item in pending:
@@ -230,10 +231,9 @@ async def open_alias(alias,cmdid):
             await db_patch("anon_inbox_items",{"id":f"eq.{item['id']}"},{"unread":False}); ok+=1
         except Exception:
             fail+=1; await react(uid,item["user_message_id"],"👎")
-    msg=f"Chat opened: <code>{html.escape(u['alias'])}</code>"
-    if ok: msg+=f"\nDelivered {ok} unread."
-    if fail: msg+=f"\n{fail} message(s) unavailable."
-    await technical(msg)
+    msg=f"Retrieved {ok} unread message(s)."
+    if fail: msg+=f" {fail} message(s) unavailable."
+    if ok or fail: await technical(msg)
 
 async def inbox(page,cmdid):
     if page<1: await react(ADMIN_ID,cmdid,"👎"); return
