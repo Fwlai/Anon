@@ -188,7 +188,7 @@ async def handle_user(m,user):
     kind=kind_of(m); await store_inbox(uid,m,kind); await activity(uid)
     mapped=None; reply=m.get("reply_to_message")
     if reply:
-        rows=await db_get("anon_outbound_map",{"user_message_id":f"eq.{reply['message_id']}","select":"*"})
+        rows=await db_get("anon_outbound_map",{"user_message_id":f"eq.{reply['message_id']}","sender_user_id":f"eq.{uid}","select":"*"})
         if rows: mapped=rows[0]["admin_message_id"]
         else:
             rows=await db_get("anon_message_map",{"user_message_id":f"eq.{reply['message_id']}","sender_user_id":f"eq.{uid}","select":"*"})
