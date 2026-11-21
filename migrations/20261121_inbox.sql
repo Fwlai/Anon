@@ -1,3 +1,5 @@
+ALTER TABLE public.anon_message_map ADD COLUMN IF NOT EXISTS user_message_id bigint;
+
 CREATE TABLE IF NOT EXISTS public.anon_inbox_items (
   id bigserial PRIMARY KEY,
   user_id bigint NOT NULL,
