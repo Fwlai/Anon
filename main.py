@@ -167,12 +167,16 @@ async def edit_incoming_copy(m):
     uid=m["from"]["id"]
     rows=await db_get("anon_message_map",{"sender_user_id":f"eq.{uid}","user_message_id":f"eq.{m['message_id']}","select":"*"})
     if not rows:
+        await react(uid,m["message_id"],"👎")
         return
     admin_mid=rows[0]["admin_message_id"]
-    if "text" in m:
-        await tg("editMessageText",{"chat_id":ADMIN_ID,"message_id":admin_mid,"text":m.get("text","")})
-    else:
-        await tg("editMessageCaption",{"chat_id":ADMIN_ID,"message_id":admin_mid,"caption":m.get("caption","")})
+    try:
+        if "text" in m:
+            await tg("editMessageText",{"chat_id":ADMIN_ID,"message_id":admin_mid,"text":m.get("text","")})
+        else:
+            await tg("editMessageCaption",{"chat_id":ADMIN_ID,"message_id":admin_mid,"caption":m.get("caption","")})
+    except Exception:
+        await react(ADMIN_ID,admin_mid,"👎")
 
 async def relay_live(m,user,reply_to=None):
     uid=m["from"]["id"]; now=datetime.now(timezone.utc)
