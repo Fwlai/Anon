@@ -32,8 +32,8 @@ async def db_get(table, params):
     r.raise_for_status()
     return r.json()
 
-async def db_post(table, payload, prefer="return=representation"):
-    r = await client.post(f"{REST}/{table}", json=payload, headers=db_headers(prefer))
+async def db_post(table, payload, prefer="return=representation", params=None):
+    r = await client.post(f"{REST}/{table}", params=params, json=payload, headers=db_headers(prefer))
     r.raise_for_status()
     return r.json() if r.content else []
 
@@ -150,7 +150,7 @@ def kind_of(m):
 async def store_inbox(uid,m,kind):
     p={"user_id":uid,"user_message_id":m["message_id"],"message_kind":kind,"unread":True}
     if m.get("media_group_id"): p["media_group_id"]=str(m["media_group_id"])
-    await db_post("anon_inbox_items",p,"resolution=ignore-duplicates,return=minimal")
+    await db_post("anon_inbox_items",p,"resolution=ignore-duplicates,return=minimal",{"on_conflict":"user_id,user_message_id"})
 
 async def map_outbound(user_mid,uid,admin_mid):
     await db_post("anon_outbound_map",{"user_message_id":user_mid,"sender_user_id":uid,"admin_message_id":admin_mid},"resolution=ignore-duplicates,return=minimal")
