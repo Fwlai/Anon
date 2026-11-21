@@ -129,6 +129,9 @@ async def admin_state():
 async def set_active(uid):
     await db_post("anon_admin_state",{"admin_user_id":ADMIN_ID,"active_user_id":uid},"resolution=merge-duplicates,return=minimal")
 
+async def set_inbox_page(page):
+    await db_post("anon_admin_state",{"admin_user_id":ADMIN_ID,"inbox_page":page},"resolution=merge-duplicates,return=minimal")
+
 async def activity(uid):
     await db_post("anon_chat_activity",{"user_id":uid,"last_activity":datetime.now(timezone.utc).isoformat()},"resolution=merge-duplicates,return=minimal")
 
@@ -155,8 +158,10 @@ async def store_inbox(uid,m,kind):
 async def map_outbound(user_mid,uid,admin_mid):
     await db_post("anon_outbound_map",{"user_message_id":user_mid,"sender_user_id":uid,"admin_message_id":admin_mid},"resolution=ignore-duplicates,return=minimal")
 
-async def technical(text):
-    await send_user(ADMIN_ID,f"<blockquote>{text}</blockquote>","HTML")
+async def technical(text, reply_markup=None):
+    payload={"chat_id":ADMIN_ID,"text":f"<blockquote>{text}</blockquote>","parse_mode":"HTML"}
+    if reply_markup is not None: payload["reply_markup"]=reply_markup
+    await tg("sendMessage",payload)
 
 async def notification(user,m,kind):
     alias=html.escape(user["alias"])
@@ -252,15 +257,19 @@ async def inbox(page,cmdid):
         if u:
             count=counts.get(uid,0); badge=f" · <b>{count} new</b>" if count else ""
             lines.append(f"{n}. <code>{html.escape(u['alias'])}</code>{badge}")
-    nav=[]
-    if page>1: nav.append(f"<code>/i {page-1}</code>")
-    if page<pages: nav.append(f"<code>/i {page+1}</code>")
-    if nav: lines.append("\n"+" · ".join(nav))
     lines.append("\nOpen: <code>/i Alias</code> · Close: <code>/c</code>")
-    await technical("\n".join(lines))
+    keyboard={"keyboard":[[{"text":"«"},{"text":str(page)},{"text":"»"}]],"resize_keyboard":True,"is_persistent":True}
+    await technical("\n".join(lines),keyboard)
 
 async def route_admin(m):
     text=m.get("text","")
+    if text in {"«","»"}:
+        state=await admin_state(); page=int(state.get("inbox_page") or 1)
+        page=max(1,page-1) if text=="«" else page+1
+        await inbox(page,m["message_id"])
+        return
+    state=await admin_state()
+    if text.isdigit() and int(text)==int(state.get("inbox_page") or 1): return
     if text.startswith("/"):
         if await admin_command(m): return
         return
@@ -302,8 +311,7 @@ async def admin_command(message):
     match=re.fullmatch(r"/i(?:@\w+)?(?:\s+(.+))?\s*",text,re.I)
     if match:
         arg=(match.group(1) or "").strip()
-        if not arg: await inbox(1,message["message_id"])
-        elif arg.isdigit(): await inbox(int(arg),message["message_id"])
+        if not arg: await set_inbox_page(1); await inbox(1,message["message_id"])
         elif re.fullmatch(r"[A-Za-z]+-\d{2}",arg): await open_alias(arg,message["message_id"])
         else: await react(ADMIN_ID,message["message_id"],"👎")
         return True
