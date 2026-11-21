@@ -354,27 +354,6 @@ async def map_admin_message(msg_id, sender_id, user_message_id=None):
         payload["user_message_id"] = user_message_id
     await db_post("anon_message_map", payload, "resolution=ignore-duplicates,return=minimal")
 
-async def relay_to_admin(message, user):
-    uid = message["from"]["id"]
-    now = datetime.now(timezone.utc)
-    sessions = await db_get("anon_admin_sessions", {"sender_user_id": f"eq.{uid}", "select": "*"})
-    new_session = not sessions
-    if sessions:
-        stamp = sessions[0]["last_message_at"].replace("Z", "+00:00")
-        last = datetime.fromisoformat(stamp)
-        new_session = (now - last).total_seconds() >= 600
-    if new_session:
-        header = await tg("sendMessage", {"chat_id": ADMIN_ID, "text": f"<blockquote>Alias: <code>{user['alias']}</code></blockquote>", "parse_mode": "HTML"})
-        await map_admin_message(header["message_id"], uid)
-    try:
-        copied = await tg("copyMessage", {"chat_id": ADMIN_ID, "from_chat_id": uid, "message_id": message["message_id"]})
-    except Exception:
-        await react_status(uid, message["message_id"], False)
-        raise
-    await map_admin_message(copied["message_id"], uid, message["message_id"])
-    await db_post("anon_admin_sessions", {"sender_user_id": uid, "last_message_at": now.isoformat()}, "resolution=merge-duplicates,return=minimal")
-    await react_status(uid, message["message_id"], True)
-
 app = FastAPI()
 
 @app.api_route("/", methods=["GET", "HEAD"])
@@ -468,12 +447,12 @@ async def startup():
                 "secret_token": WEBHOOK_SECRET,
                 "allowed_updates": ["message", "edited_message"]
             })
-            await send_user(ADMIN_ID, "Anon started. Webhook is configured.")
+            await technical("Anon started. Webhook is configured.")
             log.info("Startup check and webhook setup passed")
         except Exception:
             log.error("Startup or webhook setup failed; details suppressed to protect bot token")
             try:
-                await send_user(ADMIN_ID, "Anon startup/webhook setup failed. Check Render logs.")
+                await technical("Anon startup/webhook setup failed. Check Render logs.")
             except Exception:
                 pass
     else:
@@ -483,7 +462,7 @@ async def startup():
 async def shutdown():
     if BOT_TOKEN and ADMIN_ID:
         try:
-            await send_user(ADMIN_ID, "Anon stopped.")
+            await technical("Anon stopped.")
         except Exception:
             pass
     await client.aclose()
