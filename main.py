@@ -147,8 +147,12 @@ async def mark_update(update_id):
     rows = await db_post("anon_processed_updates", {"update_id": update_id}, "resolution=ignore-duplicates,return=representation")
     return bool(rows)
 
+async def unmark_update(update_id):
+    r = await client.delete(f"{REST}/anon_processed_updates", params={"update_id": f"eq.{update_id}"}, headers=db_headers("return=minimal"))
+    r.raise_for_status()
+
 async def rate_ok(uid):
-    r = await client.post(f"{REST}/rpc/anon_rate_check", json={"p_user_id": uid, "p_limit": 50, "p_window_seconds": 10}, headers=db_headers("return=minimal"))
+    r = await client.post(f"{REST}/rpc/anon_rate_check", json={"p_user_id": uid, "p_limit": 50, "p_window_seconds": 10}, headers=db_headers("return=representation"))
     r.raise_for_status()
     return r.json() is True
 
@@ -219,10 +223,15 @@ async def webhook(request: Request):
         if reply:
             rows = await db_get("anon_message_map", {"admin_message_id": f"eq.{reply['message_id']}", "select": "*"})
             if rows:
-                try:
-                    await tg("copyMessage", {"chat_id": rows[0]["sender_user_id"], "from_chat_id": ADMIN_ID, "message_id": message["message_id"]})
-                except Exception:
-                    log.warning("Admin reply delivery failed")
+                recipient = await get_user(rows[0]["sender_user_id"])
+                if recipient and not recipient.get("blocked_admin") and not recipient.get("blocked_by_admin"):
+                    try:
+                        await tg("copyMessage", {"chat_id": recipient["telegram_user_id"], "from_chat_id": ADMIN_ID, "message_id": message["message_id"]})
+                    except Exception:
+                        log.exception("Admin reply delivery failed")
+                        if update_id is not None:
+                            await unmark_update(update_id)
+                        raise HTTPException(status_code=503, detail="reply delivery failed")
         return {"ok": True}
 
     text = message.get("text", "")
@@ -249,11 +258,15 @@ async def webhook(request: Request):
             return {"ok": True}
     except Exception:
         log.exception("Rate-limit check failed")
-        return {"ok": True}
+        if update_id is not None:
+            await unmark_update(update_id)
+        raise HTTPException(status_code=503, detail="rate limit unavailable")
     try:
         await relay_to_admin(message, user)
     except Exception:
         log.exception("Message relay failed")
+        if update_id is not None:
+            await unmark_update(update_id)
         raise HTTPException(status_code=503, detail="relay failed")
     return {"ok": True}
 
