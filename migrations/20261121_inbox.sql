@@ -14,10 +14,11 @@ CREATE INDEX IF NOT EXISTS anon_inbox_unread_recent_idx ON public.anon_inbox_ite
 CREATE INDEX IF NOT EXISTS anon_inbox_user_unread_idx ON public.anon_inbox_items (user_id, unread, created_at ASC);
 CREATE INDEX IF NOT EXISTS anon_inbox_media_group_idx ON public.anon_inbox_items (user_id, media_group_id);
 CREATE TABLE IF NOT EXISTS public.anon_outbound_map (
-  user_message_id bigint PRIMARY KEY,
+  user_message_id bigint NOT NULL,
   sender_user_id bigint NOT NULL,
-  admin_message_id bigint NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now()
+  admin_message_id bigint NOT NULL UNIQUE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (sender_user_id, user_message_id)
 );
 CREATE INDEX IF NOT EXISTS anon_outbound_sender_idx ON public.anon_outbound_map (sender_user_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS public.anon_chat_activity (
