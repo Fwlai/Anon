@@ -222,7 +222,7 @@ async def open_alias(alias,cmdid):
         await react(ADMIN_ID,cmdid,"👎"); return
     uid=u["telegram_user_id"]; await set_active(uid); await activity(uid)
     await technical(f"Chat: <code>{html.escape(u['alias'])}</code>")
-    pending=await db_get("anon_inbox_items",{"user_id":f"eq.{uid}","unread":"eq.true","select":"*","order":"created_at.asc","limit":"100"})
+    pending=await db_get("anon_inbox_items",{"user_id":f"eq.{uid}","unread":"eq.true","select":"*","order":"created_at.asc","limit":"1000"})
     ok=fail=0
     for item in pending:
         try:
