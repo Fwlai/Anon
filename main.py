@@ -62,7 +62,7 @@ async def allocate_alias(uid):
             if rows:
                 return rows[0], True
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code not in (409, 400):
+            if exc.response.status_code != 409:
                 raise
             current = await get_user(uid)
             if current:
@@ -226,14 +226,26 @@ async def webhook(request: Request):
         existing = await get_user(uid)
         if existing:
             return {"ok": True}
-        user, created = await allocate_alias(uid)
+        try:
+            user, created = await allocate_alias(uid)
+        except Exception:
+            log.exception("Alias allocation failed")
+            if update_id is not None:
+                await unmark_update(update_id)
+            raise HTTPException(status_code=503, detail="alias allocation failed")
         if created:
             await react(uid, message["message_id"], "❤️")
         return {"ok": True}
 
     user = await get_user(uid)
     if not user:
-        user, created = await allocate_alias(uid)
+        try:
+            user, created = await allocate_alias(uid)
+        except Exception:
+            log.exception("Alias allocation failed")
+            if update_id is not None:
+                await unmark_update(update_id)
+            raise HTTPException(status_code=503, detail="alias allocation failed")
     if text != "/unblock":
         try:
             if not await rate_ok(uid):
