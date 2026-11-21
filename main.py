@@ -264,11 +264,16 @@ async def route_admin(m):
     if text.startswith("/"):
         if await admin_command(m): return
         return
+    state=await admin_state()
+    active=state.get("active_user_id")
     reply=m.get("reply_to_message")
     if reply:
         rows=await db_get("anon_message_map",{"admin_message_id":f"eq.{reply['message_id']}","select":"*"})
         if rows:
-            mapping=rows[0]; u=await get_user(mapping["sender_user_id"])
+            mapping=rows[0]
+            if active != mapping["sender_user_id"]:
+                await react(ADMIN_ID,m["message_id"],"👎"); return
+            u=await get_user(mapping["sender_user_id"])
             if u and not u.get("blocked_by_admin"):
                 try: await send_to_user(m,mapping["sender_user_id"],mapping.get("user_message_id"))
                 except Exception: await react(ADMIN_ID,m["message_id"],"👎")
@@ -277,6 +282,8 @@ async def route_admin(m):
         rows=await db_get("anon_outbound_map",{"admin_message_id":f"eq.{reply['message_id']}","select":"*"})
         if rows:
             mapping=rows[0]
+            if active != mapping["sender_user_id"]:
+                await react(ADMIN_ID,m["message_id"],"👎"); return
             try: await send_to_user(m,mapping["sender_user_id"],mapping["user_message_id"])
             except Exception: await react(ADMIN_ID,m["message_id"],"👎")
             return
