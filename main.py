@@ -64,7 +64,6 @@ async def allocate_alias(uid):
     current = await get_user(uid)
     if current:
         return current, False
-
     for refresh in range(4):
         occupied = set()
         offset = 0
@@ -94,6 +93,7 @@ async def allocate_alias(uid):
                     return current, False
                 break
     raise RuntimeError("Alias pool exhausted")
+
 async def set_block(uid, field, value):
     await db_patch("anon_users", {"telegram_user_id": f"eq.{uid}"}, {field: value})
 
@@ -108,6 +108,10 @@ async def react(chat_id, message_id, emoji):
         await tg("setMessageReaction", {"chat_id": chat_id, "message_id": message_id, "reaction": [{"type": "emoji", "emoji": emoji}]})
     except Exception:
         log.info("Reaction request failed")
+
+async def react_status(chat_id, message_id, success):
+    if message_id is not None:
+        await react(chat_id, message_id, "👍" if success else "👎")
 
 def is_command(text):
     return isinstance(text, str) and text.startswith("/")
@@ -159,8 +163,11 @@ async def rate_ok(uid):
     r.raise_for_status()
     return r.json() is True
 
-async def map_admin_message(msg_id, sender_id):
-    await db_post("anon_message_map", {"admin_message_id": msg_id, "sender_user_id": sender_id}, "resolution=ignore-duplicates,return=minimal")
+async def map_admin_message(msg_id, sender_id, user_message_id=None):
+    payload = {"admin_message_id": msg_id, "sender_user_id": sender_id}
+    if user_message_id is not None:
+        payload["user_message_id"] = user_message_id
+    await db_post("anon_message_map", payload, "resolution=ignore-duplicates,return=minimal")
 
 async def relay_to_admin(message, user):
     uid = message["from"]["id"]
@@ -172,11 +179,16 @@ async def relay_to_admin(message, user):
         last = datetime.fromisoformat(stamp)
         new_session = (now - last).total_seconds() >= 600
     if new_session:
-        await tg("sendMessage", {"chat_id": ADMIN_ID, "text": f"<blockquote>Alias: <code>{user['alias']}</code></blockquote>", "parse_mode": "HTML"})
-    copied = await tg("copyMessage", {"chat_id": ADMIN_ID, "from_chat_id": uid, "message_id": message["message_id"]})
-    await map_admin_message(copied["message_id"], uid)
+        header = await tg("sendMessage", {"chat_id": ADMIN_ID, "text": f"<blockquote>Alias: <code>{user['alias']}</code></blockquote>", "parse_mode": "HTML"})
+        await map_admin_message(header["message_id"], uid)
+    try:
+        copied = await tg("copyMessage", {"chat_id": ADMIN_ID, "from_chat_id": uid, "message_id": message["message_id"]})
+    except Exception:
+        await react_status(uid, message["message_id"], False)
+        raise
+    await map_admin_message(copied["message_id"], uid, message["message_id"])
     await db_post("anon_admin_sessions", {"sender_user_id": uid, "last_message_at": now.isoformat()}, "resolution=merge-duplicates,return=minimal")
-    await react(uid, message["message_id"], "👍")
+    await react_status(uid, message["message_id"], True)
 
 app = FastAPI()
 
@@ -226,15 +238,24 @@ async def webhook(request: Request):
         if reply:
             rows = await db_get("anon_message_map", {"admin_message_id": f"eq.{reply['message_id']}", "select": "*"})
             if rows:
-                recipient = await get_user(rows[0]["sender_user_id"])
+                mapping = rows[0]
+                recipient_id = mapping["sender_user_id"]
+                recipient = await get_user(recipient_id)
                 if recipient and not recipient.get("blocked_by_admin"):
+                    payload = {"chat_id": recipient_id, "from_chat_id": ADMIN_ID, "message_id": message["message_id"]}
+                    if mapping.get("user_message_id"):
+                        payload["reply_to_message_id"] = mapping["user_message_id"]
                     try:
-                        await tg("copyMessage", {"chat_id": recipient["telegram_user_id"], "from_chat_id": ADMIN_ID, "message_id": message["message_id"]})
+                        await tg("copyMessage", payload)
+                        await react_status(ADMIN_ID, message["message_id"], True)
                     except Exception:
-                        log.exception("Admin reply delivery failed")
+                        await react_status(ADMIN_ID, message["message_id"], False)
+                        await react_status(recipient_id, mapping.get("user_message_id"), False)
+                        log.info("Admin reply delivery failed")
                         if update_id is not None:
                             await unmark_update(update_id)
                         raise HTTPException(status_code=503, detail="reply delivery failed")
+                    await react_status(recipient_id, mapping.get("user_message_id"), True)
         return {"ok": True}
 
     text = message.get("text", "")
@@ -273,6 +294,7 @@ async def webhook(request: Request):
     if is_command(text):
         return {"ok": True}
     if user.get("blocked_by_admin"):
+        await react_status(uid, message["message_id"], False)
         return {"ok": True}
     try:
         await relay_to_admin(message, user)
