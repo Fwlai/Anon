@@ -294,8 +294,9 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    try:
-        await send_user(ADMIN_ID, "Anon stopped.")
-    except Exception:
-        pass
+    if BOT_TOKEN and ADMIN_ID:
+        try:
+            await send_user(ADMIN_ID, "Anon stopped.")
+        except Exception:
+            pass
     await client.aclose()
