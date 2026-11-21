@@ -249,7 +249,7 @@ async def inbox(page,cmdid):
     activity_rows=await db_get("anon_chat_activity",{"select":"user_id,last_activity","order":"last_activity.desc","limit":"1000"})
     legacy=await db_get("anon_admin_sessions",{"select":"sender_user_id,last_message_at","order":"last_message_at.desc","limit":"1000"})
     ids=list(dict.fromkeys(sorted(counts,key=lambda uid:latest.get(uid,""),reverse=True)+[x["sender_user_id"] for x in legacy]+[x["user_id"] for x in activity_rows]))
-    pages=max(1,(len(ids)+9)//10); page=min(page,pages); start=(page-1)*10; selected=ids[start:start+10]
+    pages=max(1,(len(ids)+9)//10); page=min(page,pages); await set_inbox_page(page); start=(page-1)*10; selected=ids[start:start+10]
     lines=["<b>INBOX</b>",f"Unread: <b>{sum(counts.values())}</b> · Chats: {len(ids)} · Page {page}/{pages}",""]
     if not selected: lines.append("Inbox is empty.")
     for n,uid in enumerate(selected,start=start+1):
