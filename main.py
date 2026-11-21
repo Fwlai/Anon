@@ -164,7 +164,7 @@ async def relay_to_admin(message, user):
 
 app = FastAPI()
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {"service": "Anon", "status": "running"}
 
