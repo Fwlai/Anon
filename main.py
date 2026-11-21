@@ -258,7 +258,7 @@ async def inbox(page,cmdid):
             count=counts.get(uid,0); badge=f" · <b>{count} new</b>" if count else ""
             lines.append(f"{n}. <code>{html.escape(u['alias'])}</code>{badge}")
     lines.append("\nOpen: <code>/i Alias</code> · Close: <code>/c</code>")
-    keyboard={"keyboard":[[{"text":"«"},{"text":str(page)},{"text":"»"}]],"resize_keyboard":True,"is_persistent":True}
+    keyboard={"keyboard":[[{"text":"«","style":"primary"},{"text":str(page)},{"text":"»","style":"primary"}]],"resize_keyboard":True,"is_persistent":True}
     await technical("\n".join(lines),keyboard)
 
 async def route_admin(m):
