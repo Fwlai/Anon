@@ -16,7 +16,7 @@ WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
-COLORS = ["Red", "Blue", "Green", "Yellow", "Pink", "Purple", "Orange", "Brown", "Gray", "White", "Black", "Cyan", "Magenta", "Olive", "Teal", "Maroon"]
+COLORS = ["Red", "Blue", "Green", "Yellow", "Pink", "Purple", "Orange", "Brown", "Gray", "White", "Black", "Cyan", "Magenta", "Olive", "Teal", "Maroon", "Coral", "Crimson", "Gold", "Silver", "Indigo", "Violet", "Lavender", "Mint", "Lime", "Peach", "Amber", "Azure", "Navy", "Turquoise", "Rose", "Ruby", "Emerald", "Sapphire", "Lilac", "Ivory", "Charcoal", "Sky", "Plum", "Copper"]
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 REST = f"{SUPABASE_URL}/rest/v1"
 client = httpx.AsyncClient(timeout=25)
@@ -115,7 +115,7 @@ async def admin_command(message):
             await send_user(target["telegram_user_id"], "You blocked by Fwlai")
         except Exception:
             log.info("Blocked notice could not be delivered")
-        await send_user(ADMIN_ID, f"You blocked: {target['alias']}")
+        await send_user(ADMIN_ID, f"You blocked: <code>{target['alias']}</code>")
         return True
     match = re.fullmatch(r"/unblock(?:@\w+)?\s+([A-Za-z]+-\d{2})\s*", text, re.I)
     if match:
@@ -128,7 +128,7 @@ async def admin_command(message):
                 await send_user(target["telegram_user_id"], "You are unblocked by Fwlai")
             except Exception:
                 log.info("Unblock notice could not be delivered")
-            await send_user(ADMIN_ID, f"Unblocked: {target['alias']}")
+            await send_user(ADMIN_ID, f"Unblocked: <code>{target['alias']}</code>")
         else:
             await send_user(ADMIN_ID, "Alias not found.")
         return True
@@ -177,7 +177,7 @@ async def relay_to_admin(message, user):
         last = datetime.fromisoformat(stamp)
         new_session = (now - last).total_seconds() >= 600
     if new_session:
-        await tg("sendMessage", {"chat_id": ADMIN_ID, "text": f"Alias: <code>{user['alias']}</code>", "parse_mode": "HTML"})
+        await tg("sendMessage", {"chat_id": ADMIN_ID, "text": f"<blockquote>Alias: <code>{user['alias']}</code></blockquote>", "parse_mode": "HTML"})
     copied = await tg("copyMessage", {"chat_id": ADMIN_ID, "from_chat_id": uid, "message_id": message["message_id"]})
     await map_admin_message(copied["message_id"], uid)
     await db_post("anon_admin_sessions", {"sender_user_id": uid, "last_message_at": now.isoformat()}, "resolution=merge-duplicates,return=minimal")
@@ -267,17 +267,14 @@ async def webhook(request: Request):
             if update_id is not None:
                 await unmark_update(update_id)
             raise HTTPException(status_code=503, detail="alias allocation failed")
-    if text not in {"/block", "/unblock"}:
-        try:
-            if not await rate_ok(uid):
-                return {"ok": True}
-        except Exception:
-            log.exception("Rate-limit check failed")
-            if update_id is not None:
-                await unmark_update(update_id)
-            raise HTTPException(status_code=503, detail="rate limit unavailable")
-    if await user_command(message, user):
-        return {"ok": True}
+    try:
+        if not await rate_ok(uid):
+            return {"ok": True}
+    except Exception:
+        log.error("Rate-limit check failed")
+        if update_id is not None:
+            await unmark_update(update_id)
+        raise HTTPException(status_code=503, detail="rate limit unavailable")
     if is_command(text):
         return {"ok": True}
     if user.get("blocked_admin") or user.get("blocked_by_admin"):
@@ -305,7 +302,7 @@ async def startup():
             await send_user(ADMIN_ID, "Anon started. Webhook is configured.")
             log.info("Startup check and webhook setup passed")
         except Exception:
-            log.exception("Startup or webhook setup failed")
+            log.error("Startup or webhook setup failed; details suppressed to protect bot token")
             try:
                 await send_user(ADMIN_ID, "Anon startup/webhook setup failed. Check Render logs.")
             except Exception:
