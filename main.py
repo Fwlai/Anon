@@ -3,7 +3,6 @@ import random
 import re
 import logging
 from datetime import datetime, timezone
-from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -17,7 +16,7 @@ WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
-COLORS = ["Red", "Blue", "Green", "Yellow", "Pink", "Purple", "Orange", "Brown", "Gray", "White", "Black", "Cyan", "Magenta", "Olive", "Teal", "Maroon"]
+COLORS = ["Red", "Blue", "Green", "Yellow", "Pink", "Purple", "Orange", "Brown", "Gray", "White", "Black", "Cyan", "Magenta", "Olive", "Teal","]
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 REST = f"{SUPABASE_URL}/rest/v1"
 client = httpx.AsyncClient(timeout=25)
@@ -84,18 +83,6 @@ async def react(chat_id, message_id, emoji):
 
 def is_command(text):
     return isinstance(text, str) and text.startswith("/")
-
-def command_name(text):
-    if not isinstance(text, str):
-        return ""
-    return text.split(maxsplit=1)[0].split("@")[0].lower()
-
-async def handle_start(message):
-    uid = message["from"]["id"]
-    user, created = await allocate_alias(uid)
-    if created:
-        await react(uid, message["message_id"], "❤️")
-    return
 
 async def admin_command(message):
     text = message.get("text", "")
