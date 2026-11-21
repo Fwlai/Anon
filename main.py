@@ -194,6 +194,10 @@ async def handle_user(m,user):
             rows=await db_get("anon_message_map",{"user_message_id":f"eq.{reply['message_id']}","sender_user_id":f"eq.{uid}","select":"*"})
             if rows: mapped=rows[0]["admin_message_id"]
     state=await admin_state()
+    if reply and mapped is None:
+        await react_status(uid,m["message_id"],False)
+        await db_patch("anon_inbox_items",{"user_id":f"eq.{uid}","user_message_id":f"eq.{m['message_id']}"},{"unread":False})
+        return
     if state.get("active_user_id")==uid or mapped:
         try:
             await relay_live(m,user,mapped)
@@ -238,7 +242,8 @@ async def inbox(page,cmdid):
     for x in unread:
         uid=x["user_id"]; counts[uid]=counts.get(uid,0)+1; latest.setdefault(uid,x["created_at"])
     activity_rows=await db_get("anon_chat_activity",{"select":"user_id,last_activity","order":"last_activity.desc","limit":"1000"})
-    ids=list(dict.fromkeys(sorted(counts,key=lambda uid:latest.get(uid,""),reverse=True)+[x["user_id"] for x in activity_rows]))
+    legacy=await db_get("anon_admin_sessions",{"select":"sender_user_id,last_message_at","order":"last_message_at.desc","limit":"1000"})
+    ids=list(dict.fromkeys(sorted(counts,key=lambda uid:latest.get(uid,""),reverse=True)+[x["sender_user_id"] for x in legacy]+[x["user_id"] for x in activity_rows]))
     start=(page-1)*10; selected=ids[start:start+10]; pages=max(1,(len(ids)+9)//10)
     lines=["<b>INBOX</b>",f"Unread: <b>{sum(counts.values())}</b> · Chats: {len(ids)} · Page {page}/{pages}",""]
     if not selected: lines.append("Inbox is empty.")
@@ -303,7 +308,7 @@ async def admin_command(message):
         alias = match.group(1).lower()
         rows = await db_get("anon_users", {"alias": f"ilike.{alias}", "select": "*"})
         if not rows:
-            await send_user(ADMIN_ID, "Alias not found.")
+            await technical("Alias not found.")
             return True
         target = rows[0]
         await set_block(target["telegram_user_id"], "blocked_by_admin", True)
@@ -311,7 +316,7 @@ async def admin_command(message):
             await send_user(target["telegram_user_id"], "You blocked by Fwlai")
         except Exception:
             log.info("Blocked notice could not be delivered")
-        await send_user(ADMIN_ID, f"You blocked: <code>{target['alias']}</code>", "HTML")
+        await technical(f"Blocked: <code>{html.escape(target['alias'])}</code>")
         return True
     match = re.fullmatch(r"/unblock(?:@\w+)?\s+([A-Za-z]+-\d{2})\s*", text, re.I)
     if match:
@@ -324,9 +329,9 @@ async def admin_command(message):
                 await send_user(target["telegram_user_id"], "You are unblocked by Fwlai")
             except Exception:
                 log.info("Unblock notice could not be delivered")
-            await send_user(ADMIN_ID, f"Unblocked: <code>{target['alias']}</code>", "HTML")
+            await technical(f"Unblocked: <code>{html.escape(target['alias'])}</code>")
         else:
-            await send_user(ADMIN_ID, "Alias not found.")
+            await technical("Alias not found.")
         return True
     return False
 
