@@ -234,20 +234,21 @@ async def webhook(request: Request):
     user = await get_user(uid)
     if not user:
         user, created = await allocate_alias(uid)
+    if text != "/unblock":
+        try:
+            if not await rate_ok(uid):
+                return {"ok": True}
+        except Exception:
+            log.exception("Rate-limit check failed")
+            if update_id is not None:
+                await unmark_update(update_id)
+            raise HTTPException(status_code=503, detail="rate limit unavailable")
     if await user_command(message, user):
         return {"ok": True}
     if is_command(text):
         return {"ok": True}
     if user.get("blocked_admin") or user.get("blocked_by_admin"):
         return {"ok": True}
-    try:
-        if not await rate_ok(uid):
-            return {"ok": True}
-    except Exception:
-        log.exception("Rate-limit check failed")
-        if update_id is not None:
-            await unmark_update(update_id)
-        raise HTTPException(status_code=503, detail="rate limit unavailable")
     try:
         await relay_to_admin(message, user)
     except Exception:
