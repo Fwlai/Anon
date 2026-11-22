@@ -4,6 +4,9 @@ ALTER TABLE public.anon_processed_updates
 ALTER TABLE public.anon_processed_updates
   ADD COLUMN IF NOT EXISTS lease_until timestamptz;
 
+ALTER TABLE public.anon_processed_updates
+  ADD COLUMN IF NOT EXISTS lease_token uuid;
+
 DO $$
 BEGIN
   ALTER TABLE public.anon_processed_updates
@@ -22,13 +25,16 @@ ALTER TABLE public.anon_processed_updates ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.anon_processed_updates FROM anon, authenticated;
 GRANT ALL ON public.anon_processed_updates TO service_role;
 
-CREATE OR REPLACE FUNCTION public.anon_claim_update(
+DROP FUNCTION IF EXISTS public.anon_claim_update(bigint, integer);
+
+CREATE FUNCTION public.anon_claim_update(
   p_update_id bigint,
   p_lease_seconds integer DEFAULT 300
 )
 RETURNS TABLE (
   claimed boolean,
-  state text
+  state text,
+  lease_token uuid
 )
 LANGUAGE plpgsql
 SECURITY INVOKER
@@ -37,21 +43,25 @@ AS $$
 DECLARE
   v_claimed_id bigint;
   v_state text;
+  v_lease_token uuid := gen_random_uuid();
 BEGIN
   INSERT INTO public.anon_processed_updates AS update_record (
     update_id,
     status,
-    lease_until
+    lease_until,
+    lease_token
   )
   VALUES (
     p_update_id,
     'processing',
-    now() + make_interval(secs => GREATEST(p_lease_seconds, 30))
+    now() + make_interval(secs => GREATEST(p_lease_seconds, 30)),
+    v_lease_token
   )
   ON CONFLICT (update_id)
   DO UPDATE SET
     status = 'processing',
     lease_until = EXCLUDED.lease_until,
+    lease_token = EXCLUDED.lease_token,
     created_at = now()
   WHERE update_record.status = 'processing'
     AND (
@@ -61,25 +71,28 @@ BEGIN
   RETURNING update_record.update_id INTO v_claimed_id;
 
   IF FOUND THEN
-    RETURN QUERY SELECT true, 'claimed'::text;
+    RETURN QUERY SELECT true, 'claimed'::text, v_lease_token;
     RETURN;
   END IF;
 
-  SELECT update_record.status
-    INTO v_state
+  SELECT update_record.status, update_record.lease_token
+    INTO v_state, v_lease_token
   FROM public.anon_processed_updates AS update_record
   WHERE update_record.update_id = p_update_id;
 
   IF NOT FOUND THEN
-    RETURN QUERY SELECT false, 'missing'::text;
+    RETURN QUERY SELECT false, 'missing'::text, NULL::uuid;
   ELSE
-    RETURN QUERY SELECT false, v_state;
+    RETURN QUERY SELECT false, v_state, v_lease_token;
   END IF;
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION public.anon_complete_update(
-  p_update_id bigint
+DROP FUNCTION IF EXISTS public.anon_complete_update(bigint);
+
+CREATE FUNCTION public.anon_complete_update(
+  p_update_id bigint,
+  p_lease_token uuid
 )
 RETURNS boolean
 LANGUAGE plpgsql
@@ -89,9 +102,11 @@ AS $$
 BEGIN
   UPDATE public.anon_processed_updates
   SET status = 'processed',
-      lease_until = NULL
+      lease_until = NULL,
+      lease_token = NULL
   WHERE update_id = p_update_id
-    AND status = 'processing';
+    AND status = 'processing'
+    AND lease_token = p_lease_token;
 
   RETURN FOUND;
 END;
@@ -99,9 +114,9 @@ $$;
 
 REVOKE ALL ON FUNCTION public.anon_claim_update(bigint, integer)
   FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.anon_complete_update(bigint)
+REVOKE ALL ON FUNCTION public.anon_complete_update(bigint, uuid)
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.anon_claim_update(bigint, integer)
   TO service_role;
-GRANT EXECUTE ON FUNCTION public.anon_complete_update(bigint)
+GRANT EXECUTE ON FUNCTION public.anon_complete_update(bigint, uuid)
   TO service_role;
