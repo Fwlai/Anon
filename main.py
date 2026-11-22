@@ -574,6 +574,28 @@ async def edit_incoming_copy(m):
 async def claim_album_messages(m, sender_uid, destination_uid, direction, reply_to=None):
     source_uid = ADMIN_ID if direction == "admin_to_user" else sender_uid
     group_id = str(m["media_group_id"])
+    group_filter = {
+        "source_chat_id": f"eq.{source_uid}",
+        "destination_chat_id": f"eq.{destination_uid}",
+        "media_group_id": f"eq.{group_id}",
+        "select": "status,message_id",
+        "order": "created_at.asc",
+        "limit": "100",
+    }
+    existing = await db_get("anon_album_buffer", group_filter)
+    if any(row["status"] != "pending" for row in existing):
+        await react_status(source_uid, m["message_id"], False)
+        await technical(
+            "message.album_late_part_rejected",
+            "WARNING",
+            direction=direction,
+            sender_user_id=sender_uid,
+            media_group_id=group_id,
+            message_id=m["message_id"],
+            existing_states=sorted({row["status"] for row in existing}),
+        )
+        return source_uid, group_id, []
+
     now = datetime.now(timezone.utc).isoformat()
     params = {
         "on_conflict": "source_chat_id,destination_chat_id,media_group_id,message_id"
@@ -981,6 +1003,36 @@ async def route_admin(m):
     text=m.get("text","")
     if text.startswith("/") and await admin_command(m):
         return
+
+    if m.get("media_group_id"):
+        album_rows = await db_get("anon_album_buffer", {
+            "source_chat_id": f"eq.{ADMIN_ID}",
+            "media_group_id": f"eq.{m['media_group_id']}",
+            "direction": "eq.admin_to_user",
+            "select": "sender_user_id,reply_to_message_id",
+            "order": "created_at.asc",
+            "limit": "1",
+        })
+        if album_rows:
+            uid = album_rows[0]["sender_user_id"]
+            user = await get_user(uid)
+            if user and not user.get("blocked_by_admin"):
+                try:
+                    await send_to_user(
+                        m, uid, album_rows[0].get("reply_to_message_id")
+                    )
+                except Exception as exc:
+                    await technical(
+                        "message.admin_album_delivery_failed",
+                        "ERROR",
+                        recipient_user_id=uid,
+                        **exception_fields(exc),
+                    )
+                    await react(ADMIN_ID, m["message_id"], "👎")
+                    raise
+            else:
+                await react(ADMIN_ID, m["message_id"], "👎")
+            return
 
     reply=m.get("reply_to_message")
     if reply:
