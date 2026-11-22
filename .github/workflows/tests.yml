@@ -61,6 +61,11 @@ jobs:
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_album_copy.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_retention_indexes.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_album_insert_guard.sql
+      - name: Verify migrations are safely repeatable
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_album_copy.sql
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_retention_indexes.sql
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_album_insert_guard.sql
       - name: Verify album routing, claims, mappings, late-part guard, and indexes
         run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/sql/album_migrations_test.sql
       - name: Verify concurrent claim and late insert serialization
