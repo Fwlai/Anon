@@ -118,3 +118,51 @@ $$;
 SQL
 
 wait "$route_pid"
+
+(
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+BEGIN;
+SET ROLE service_role;
+DO $$
+DECLARE
+  v_claimed boolean;
+  v_state text;
+  v_token uuid;
+BEGIN
+  SELECT claimed, state, lease_token
+    INTO v_claimed, v_state, v_token
+  FROM public.anon_claim_update(7001, 300);
+
+  IF NOT v_claimed OR v_state <> 'claimed' OR v_token IS NULL THEN
+    RAISE EXCEPTION 'first concurrent update claim failed';
+  END IF;
+END
+$$;
+SELECT pg_sleep(2);
+COMMIT;
+SQL
+) &
+update_claim_pid=$!
+
+sleep 0.2
+
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+SET ROLE service_role;
+DO $$
+DECLARE
+  v_claimed boolean;
+  v_state text;
+  v_token uuid;
+BEGIN
+  SELECT claimed, state, lease_token
+    INTO v_claimed, v_state, v_token
+  FROM public.anon_claim_update(7001, 300);
+
+  IF v_claimed OR v_state <> 'processing' OR v_token IS NULL THEN
+    RAISE EXCEPTION 'concurrent duplicate update was not fenced';
+  END IF;
+END
+$$;
+SQL
+
+wait "$update_claim_pid"
