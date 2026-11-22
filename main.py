@@ -257,8 +257,7 @@ async def db_post(table, payload, prefer="return=representation", params=None):
             error = r.json()
         except ValueError:
             error = {}
-        raise IntegrationError("supabase", "POST", resource=table, http_status=r.status_code,
-                               error_code=error.get("code"), error=safe_error_message(error.get("message")))
+        raise IntegrationError("supabase", "POST", resource=table, http_status=r.status_code,                               error_code=error.get("code"), error=safe_error_message(error.get("message")))
     try:
         return r.json() if r.content else []
     except ValueError:
@@ -434,15 +433,35 @@ async def technical(event, level="INFO", notify_group=True, **details):
         if not chat_id:
             return record
         text = json.dumps(record, ensure_ascii=False, indent=2)
-        if utf16_length(text) > 3900:
+        if utf16_length(text) > 3000:
             record["details"] = {"truncated": True, "available_fields": list(details.keys())}
             text = json.dumps(record, ensure_ascii=False, indent=2)
-        await tg("sendMessage", {
-            "chat_id": chat_id,
-            "text": text,
-            "entities": [{"type": "pre", "offset": 0, "length": utf16_length(text), "language": "json"}],
-            "disable_web_page_preview": True,
-        })
+        # Backtick-escape code fence markers inside JSON strings to preserve the Markdown block.
+        safe_json = text.replace("```", "\\u0060\\u0060\\u0060")
+        event_label = str(event).replace("`", "\\`")
+        rich_markdown = (
+            f"# Anon Log\\n"
+            f"**{level.upper()}**  ` {event_label} `\\n\\n"
+            f"```json\\n{safe_json}\\n```"
+        )
+        try:
+            await tg("sendRichMessage", {
+                "chat_id": chat_id,
+                "rich_message": {"markdown": rich_markdown},
+                "disable_notification": level.upper() in ("INFO",),
+            })
+        except Exception as rich_exc:
+            # Preserve visibility if Rich Messages aren't accepted by the API.
+            await tg("sendMessage", {
+                "chat_id": chat_id,
+                "text": text,
+                "entities": [{"type": "pre", "offset": 0, "length": utf16_length(text), "language": "json"}],
+                "disable_web_page_preview": True,
+            })
+            write_log_record(make_log_record(
+                "logging.rich_message_fallback_used", "WARNING",
+                source_event=event, **exception_fields(rich_exc),
+            ))
     except Exception as exc:
         failure = make_log_record(
             "logging.telegram_delivery_failed",
@@ -517,8 +536,7 @@ async def handle_user(m,user):
         await react_status(uid,m["message_id"],False)
         await db_patch("anon_inbox_items",{"user_id":f"eq.{uid}","user_message_id":f"eq.{m['message_id']}"},{"unread":False})
         return
-    if state.get("active_user_id")==uid or mapped:
-        try:
+    if state.get("active_user_id")==uid or mapped:        try:
             await relay_live(m,user,mapped)
             await db_patch("anon_inbox_items",{"user_id":f"eq.{uid}","user_message_id":f"eq.{m['message_id']}"},{"unread":False})
         except Exception as exc:
@@ -777,8 +795,7 @@ async def request_observability(request: Request, call_next):
     except Exception as exc:
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
         await technical(
-            "http.request_exception",
-            "ERROR",
+            "http.request_exception",            "ERROR",
             method=request.method,
             path=request.url.path,
             duration_ms=duration_ms,
