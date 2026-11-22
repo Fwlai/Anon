@@ -40,6 +40,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
             "chat_id": main.ADMIN_ID,
             "from_chat_id": 123,
             "message_ids": [101, 102],
+            "reply_parameters": {"message_id": 555},
         })
         finish.assert_awaited_once_with(123, main.ADMIN_ID, "album-1", [
             {"source_message_id": 101, "destination_message_id": 901},
@@ -75,6 +76,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
             "chat_id": 123,
             "from_chat_id": main.ADMIN_ID,
             "message_ids": [201, 202],
+            "reply_parameters": {"message_id": 666},
         })
         finish.assert_awaited_once_with(main.ADMIN_ID, 123, "album-2", [
             {"source_message_id": 201, "destination_message_id": 801},
