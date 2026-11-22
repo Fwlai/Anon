@@ -14,9 +14,9 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
         }
         buffered = [
             {"sender_user_id": 123, "direction": "user_to_admin",
-             "message_id": 101, "reply_to_message_id": None},
+             "message_id": 101, "reply_to_message_id": 555},
             {"sender_user_id": 123, "direction": "user_to_admin",
-             "message_id": 102, "reply_to_message_id": None},
+             "message_id": 102, "reply_to_message_id": 555},
         ]
         copied = [{"message_id": 901}, {"message_id": 902}]
 
@@ -56,9 +56,9 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
         }
         buffered = [
             {"sender_user_id": 123, "direction": "admin_to_user",
-             "message_id": 201, "reply_to_message_id": None},
+             "message_id": 201, "reply_to_message_id": 666},
             {"sender_user_id": 123, "direction": "admin_to_user",
-             "message_id": 202, "reply_to_message_id": None},
+             "message_id": 202, "reply_to_message_id": 666},
         ]
 
         with patch.object(main, "claim_album_messages", new=AsyncMock(
