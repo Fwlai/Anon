@@ -445,8 +445,7 @@ async def technical(event, level="INFO", notify_group=True, **details):
         safe_json = text.replace("```", "\\u0060\\u0060\\u0060")
         event_label = str(event).replace("`", "\\`")
         rich_markdown = (
-            f"# Anon Log\n"
-            f"**{level.upper()}**  ` {event_label} `\n\n"
+            f"` {event_label} `\n\n"
             f"```json\n{safe_json}\n```"
         )
         try:
