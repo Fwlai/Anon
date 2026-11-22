@@ -28,7 +28,7 @@ CREATE INDEX IF NOT EXISTS anon_processed_updates_processing_lease_idx
   WHERE status = 'processing';
 
 ALTER TABLE public.anon_processed_updates ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON public.anon_processed_updates FROM anon, authenticated;
+REVOKE ALL ON public.anon_processed_updates FROM PUBLIC, anon, authenticated;
 GRANT ALL ON public.anon_processed_updates TO service_role;
 
 DROP FUNCTION IF EXISTS public.anon_claim_update(bigint, integer);
