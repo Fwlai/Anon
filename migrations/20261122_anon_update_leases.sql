@@ -7,7 +7,13 @@ ALTER TABLE public.anon_processed_updates
 ALTER TABLE public.anon_processed_updates
   ADD COLUMN IF NOT EXISTS lease_token uuid;
 
-DO $$
+ALTER TABLE public.anon_processed_updates
+  ALTER COLUMN status SET DEFAULT 'processing';
+
+ALTER TABLE public.anon_processed_updates
+  ALTER COLUMN lease_until SET DEFAULT (now() + interval '5 minutes');
+
+DO $
 BEGIN
   ALTER TABLE public.anon_processed_updates
     ADD CONSTRAINT anon_processed_updates_status_check
