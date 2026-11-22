@@ -34,9 +34,14 @@ logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()], forc
 for handler in logging.getLogger().handlers:
     handler.setFormatter(JSONLogFormatter())
 
+for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+    for handler in logging.getLogger(logger_name).handlers:
+        handler.setFormatter(JSONLogFormatter())
+
 log = logging.getLogger("anon")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").disabled = True
 REQUEST_ID = ContextVar("request_id", default=None)
 UPDATE_ID = ContextVar("update_id", default=None)
 
@@ -681,6 +686,8 @@ app = FastAPI()
 @app.middleware("http")
 async def request_observability(request: Request, call_next):
     incoming_id = request.headers.get("Rndr-Id")
+    if incoming_id and not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", incoming_id):
+        incoming_id = None
     request_id = incoming_id or uuid.uuid4().hex
     request_token = REQUEST_ID.set(request_id)
     update_token = UPDATE_ID.set(None)
