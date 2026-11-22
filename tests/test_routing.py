@@ -321,5 +321,28 @@ class ContentCopyTests(unittest.IsolatedAsyncioTestCase):
 
 
 
+    async def test_selected_alias_rate_limit_is_retried(self):
+        message = {
+            "message_id": 510,
+            "from": {"id": main.ADMIN_ID},
+            "text": "retry this delivery",
+        }
+
+        with patch.object(main, "admin_state", new=AsyncMock(return_value={
+            "active_user_id": 123
+        })), patch.object(main, "get_user", new=AsyncMock(return_value={
+            "telegram_user_id": 123,
+            "alias": "Blue-01",
+            "blocked_by_admin": False,
+        })), patch.object(main, "send_to_user", new=AsyncMock(
+            side_effect=main.IntegrationError(
+                "telegram", "copyMessage", error_code=429, http_status=200
+            )
+        )), patch.object(main, "react", new=AsyncMock()), \\
+             patch.object(main, "technical", new=AsyncMock()):
+            with self.assertRaises(main.IntegrationError):
+                await main.route_admin(message)
+
+
 if __name__ == "__main__":
     unittest.main()
