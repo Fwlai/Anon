@@ -98,3 +98,13 @@ grant all on public.anon_admin_sessions to service_role;
 grant all on public.anon_processed_updates to service_role;
 grant all on public.anon_rate_limits to service_role;
 grant execute on function public.anon_rate_check(bigint, integer, integer) to service_role;
+
+create table if not exists public.anon_log_config (
+  config_key text primary key check (config_key = 'log_chat'),
+  chat_id bigint not null,
+  registered_by bigint not null,
+  registered_at timestamptz not null default now()
+);
+alter table public.anon_log_config enable row level security;
+revoke all on public.anon_log_config from anon, authenticated;
+grant all on public.anon_log_config to service_role;
