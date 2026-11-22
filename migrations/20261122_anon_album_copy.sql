@@ -44,7 +44,7 @@ RETURNS TABLE (
 LANGUAGE plpgsql
 SECURITY INVOKER
 SET search_path = public
-AS $
+AS $$
 BEGIN
   INSERT INTO public.anon_album_routes AS route (
     source_chat_id,
@@ -65,7 +65,7 @@ BEGIN
 
   RETURN NEXT;
 END;
-$;
+$$;
 
 REVOKE ALL ON FUNCTION public.anon_reserve_admin_album_route(bigint, text, bigint, bigint)
   FROM PUBLIC, anon, authenticated;
