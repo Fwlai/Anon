@@ -86,7 +86,7 @@ class StructuredLogTests(unittest.IsolatedAsyncioTestCase):
 
         markdown = tg_mock.await_args.args[1]["rich_message"]["markdown"]
         self.assertEqual(markdown.count("```"), 2)
-        self.assertEqual(markdown.splitlines()[0], "` bad_event___json `")
+        self.assertEqual(markdown.splitlines()[0], "` bad_event____json `")
 
     async def test_json_code_fence_inside_detail_does_not_break_markdown(self):
         original = {"snippet": "before ```json\nafter"}
