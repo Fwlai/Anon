@@ -94,6 +94,33 @@ class WebhookDuplicateLeaseTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 503)
 
+    async def test_expired_unknown_update_is_acknowledged_without_replay(self):
+        with (
+            patch.object(main, "WEBHOOK_SECRET", "test-secret"),
+            patch.object(main, "mark_update", new=AsyncMock(return_value={
+                "claimed": False,
+                "state": "unknown",
+                "lease_token": None,
+            })),
+            patch.object(main, "technical", new=AsyncMock()) as technical,
+        ):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=main.app),
+                base_url="http://test",
+            ) as client:
+                response = await client.post(
+                    "/telegram/webhook",
+                    headers={"X-Telegram-Bot-Api-Secret-Token": "test-secret"},
+                    json={"update_id": 12345},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"ok": True, "unknown": True})
+        self.assertTrue(any(
+            call.args[0] == "telegram.update_lease_expired_unknown"
+            for call in technical.await_args_list
+        ))
+
     async def test_completed_duplicate_is_acknowledged_without_reprocessing(self):
         with (
             patch.object(main, "WEBHOOK_SECRET", "test-secret"),
