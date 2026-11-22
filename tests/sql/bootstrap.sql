@@ -44,4 +44,6 @@ CREATE TABLE public.anon_processed_updates (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+INSERT INTO public.anon_processed_updates (update_id) VALUES (6000);
+
 GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
