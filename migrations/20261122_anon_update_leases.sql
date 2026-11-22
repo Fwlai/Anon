@@ -13,7 +13,7 @@ ALTER TABLE public.anon_processed_updates
 ALTER TABLE public.anon_processed_updates
   ALTER COLUMN lease_until SET DEFAULT (now() + interval '5 minutes');
 
-DO $
+DO $$
 BEGIN
   ALTER TABLE public.anon_processed_updates
     ADD CONSTRAINT anon_processed_updates_status_check
