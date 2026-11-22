@@ -89,6 +89,7 @@ END;
 $$;
 
 DROP FUNCTION IF EXISTS public.anon_complete_update(bigint);
+DROP FUNCTION IF EXISTS public.anon_complete_update(bigint, uuid);
 
 CREATE FUNCTION public.anon_complete_update(
   p_update_id bigint,
