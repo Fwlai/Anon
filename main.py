@@ -158,10 +158,42 @@ async def store_inbox(uid,m,kind):
 async def map_outbound(user_mid,uid,admin_mid):
     await db_post("anon_outbound_map",{"user_message_id":user_mid,"sender_user_id":uid,"admin_message_id":admin_mid},"resolution=ignore-duplicates,return=minimal")
 
+async def log_chat_id():
+    rows = await db_get("anon_log_config", {"config_key": "eq.log_chat", "select": "chat_id", "limit": "1"})
+    return int(rows[0]["chat_id"]) if rows else None
+
 async def technical(text, reply_markup=None):
-    payload={"chat_id":ADMIN_ID,"text":f"<blockquote>{text}</blockquote>","parse_mode":"HTML"}
-    if reply_markup is not None: payload["reply_markup"]=reply_markup
-    await tg("sendMessage",payload)
+    try:
+        chat_id = await log_chat_id()
+        if not chat_id:
+            log.info("TECH_LOG (group not registered): %s", text)
+            return
+        fence = chr(96) * 3
+        await tg("sendMessage", {"chat_id": chat_id, "text": fence + "\nLog\n" + str(text) + "\n" + fence})
+    except Exception as exc:
+        log.warning("Technical log delivery failed (%s)", type(exc).__name__)
+
+async def register_log_group(message):
+    chat = message.get("chat", {})
+    sender = message.get("from", {})
+    if chat.get("type") not in ("group", "supergroup") or sender.get("id") != ADMIN_ID:
+        return False
+    try:
+        me = await tg("getMe", {})
+        member = await tg("getChatMember", {"chat_id": chat["id"], "user_id": me["id"]})
+        if member.get("status") not in ("administrator", "creator"):
+            await tg("sendMessage", {"chat_id": chat["id"], "text": "I need to be an administrator in this group before registration."})
+            return True
+        await db_post("anon_log_config", {"config_key": "log_chat", "chat_id": chat["id"], "registered_by": ADMIN_ID, "registered_at": datetime.now(timezone.utc).isoformat()}, "resolution=merge-duplicates,return=minimal")
+        await tg("sendMessage", {"chat_id": chat["id"], "text": "Log group registered. Technical logs will be sent here."})
+        await technical("Log group registered and ready.")
+    except Exception as exc:
+        log.warning("Log group registration failed (%s)", type(exc).__name__)
+        try:
+            await tg("sendMessage", {"chat_id": chat["id"], "text": "Registration failed. Check bot permissions and database connection."})
+        except Exception:
+            pass
+    return True
 
 async def edit_incoming_copy(m):
     uid=m["from"]["id"]
@@ -201,6 +233,7 @@ async def handle_user(m,user):
         await react_status(uid,m["message_id"],False); return
     if not await rate_ok(uid): return
     kind=kind_of(m); await store_inbox(uid,m,kind); await activity(uid)
+    await technical("Incoming message: " + user["alias"] + " | " + kind)
     mapped=None; reply=m.get("reply_to_message")
     if reply:
         rows=await db_get("anon_outbound_map",{"user_message_id":f"eq.{reply['message_id']}","sender_user_id":f"eq.{uid}","select":"*"})
@@ -308,19 +341,19 @@ async def route_admin(m):
             try: await send_to_user(m,uid)
             except Exception: await react(ADMIN_ID,m["message_id"],"👎")
             return
-    await technical("No chat open. Use <code>/i Alias</code>.")
+    await technical("No chat open. Use /i Alias.")
 
 async def admin_command(message):
     text = message.get("text", "")
     match=re.fullmatch(r"/i(?:@\w+)?(?:\s+(.+))?\s*",text,re.I)
     if match:
         arg=(match.group(1) or "").strip()
-        if not arg: await technical("Inbox list disabled. Use <code>/i Alias</code> to open a conversation.",{"remove_keyboard":True})
+        if not arg: await technical("Inbox list disabled. Use /i Alias to open a conversation.")
         elif re.fullmatch(r"[A-Za-z]+-\d{2}",arg): await open_alias(arg,message["message_id"])
         else: await react(ADMIN_ID,message["message_id"],"👎")
         return True
     if re.fullmatch(r"/c(?:@\w+)?\s*",text,re.I):
-        await set_active(None); await technical("Chat closed.",{"remove_keyboard":True})
+        await set_active(None); await technical("Chat closed.")
         return True
     match = re.fullmatch(r"/block(?:@\w+)?\s+([A-Za-z]+-\d{2})\s*", text, re.I)
     if match:
@@ -411,6 +444,12 @@ async def webhook(request: Request):
     if not uid or sender.get("is_bot"):
         return {"ok": True}
 
+    chat = message.get("chat", {})
+    if chat.get("type") in ("group", "supergroup"):
+        if isinstance(message.get("text"), str) and re.match(r"^/setlog(?:@\w+)?\s*$", message["text"], re.I):
+            await register_log_group(message)
+        return {"ok": True}
+
     if uid == ADMIN_ID:
         try:
             await route_admin(message)
@@ -440,6 +479,7 @@ async def webhook(request: Request):
             raise HTTPException(status_code=503, detail="alias allocation failed")
         if created:
             await react(uid, message["message_id"], "❤️")
+            await technical("New user registered: " + user["alias"])
         return {"ok": True}
 
     user = await get_user(uid)
@@ -448,9 +488,12 @@ async def webhook(request: Request):
             user, created = await allocate_alias(uid)
         except Exception:
             log.exception("Alias allocation failed")
+            await technical("ERROR: Alias allocation failed")
             if update_id is not None:
                 await unmark_update(update_id)
             raise HTTPException(status_code=503, detail="alias allocation failed")
+        if created:
+            await technical("New user registered: " + user["alias"])
     if is_command(text):
         return {"ok": True}
     try:
@@ -473,12 +516,12 @@ async def startup():
                 "secret_token": WEBHOOK_SECRET,
                 "allowed_updates": ["message", "edited_message"]
             })
-            await technical("Anon started. Webhook is configured.")
+            await technical("Bot started. Webhook is configured.")
             log.info("Startup check and webhook setup passed")
         except Exception:
             log.error("Startup or webhook setup failed; details suppressed to protect bot token")
             try:
-                await technical("Anon startup/webhook setup failed. Check Render logs.")
+                await technical("ERROR: Startup or webhook setup failed. Check Render logs.")
             except Exception:
                 pass
     else:
@@ -488,7 +531,7 @@ async def startup():
 async def shutdown():
     if BOT_TOKEN and ADMIN_ID:
         try:
-            await technical("Anon stopped.")
+            await technical("Bot stopped.")
         except Exception:
             pass
     await client.aclose()
