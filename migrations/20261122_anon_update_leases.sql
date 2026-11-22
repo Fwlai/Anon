@@ -135,3 +135,5 @@ GRANT EXECUTE ON FUNCTION public.anon_claim_update(bigint, integer)
   TO service_role;
 GRANT EXECUTE ON FUNCTION public.anon_complete_update(bigint, uuid)
   TO service_role;
+
+NOTIFY pgrst, 'reload schema';
