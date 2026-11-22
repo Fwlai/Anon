@@ -18,6 +18,11 @@ BEGIN
     RAISE EXCEPTION 'anon role can read processed update leases';
   END IF;
 
+  IF has_table_privilege('anon', 'public.anon_album_buffer', 'SELECT')
+     OR has_table_privilege('anon', 'public.anon_album_routes', 'SELECT') THEN
+    RAISE EXCEPTION 'anon role can read private album routing tables';
+  END IF;
+
   IF has_function_privilege(
     'anon', 'public.anon_claim_update(bigint,integer)', 'EXECUTE'
   ) THEN
