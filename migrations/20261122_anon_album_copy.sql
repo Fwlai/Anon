@@ -46,7 +46,7 @@ SECURITY INVOKER
 SET search_path = public
 AS $
 BEGIN
-  INSERT INTO public.anon_album_routes (
+  INSERT INTO public.anon_album_routes AS route (
     source_chat_id,
     media_group_id,
     recipient_user_id,
@@ -58,13 +58,12 @@ BEGIN
     p_candidate_user_id,
     p_reply_to_message_id
   )
-  ON CONFLICT (source_chat_id, media_group_id) DO NOTHING;
+  ON CONFLICT (source_chat_id, media_group_id)
+  DO UPDATE SET recipient_user_id = route.recipient_user_id
+  RETURNING route.recipient_user_id, route.reply_to_message_id
+    INTO recipient_user_id, reply_to_message_id;
 
-  RETURN QUERY
-  SELECT route.recipient_user_id, route.reply_to_message_id
-  FROM public.anon_album_routes AS route
-  WHERE route.source_chat_id = p_source_chat_id
-    AND route.media_group_id = p_media_group_id;
+  RETURN NEXT;
 END;
 $;
 
