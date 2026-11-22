@@ -8,7 +8,53 @@ DECLARE
   v_count integer;
   v_recipient bigint;
   v_reply bigint;
+  v_claimed boolean;
+  v_state text;
 BEGIN
+  SELECT claimed, state INTO v_claimed, v_state
+  FROM public.anon_claim_update(6000, 30);
+  IF v_claimed OR v_state <> 'processed' THEN
+    RAISE EXCEPTION 'legacy processed update was not preserved';
+  END IF;
+
+  SELECT claimed, state INTO v_claimed, v_state
+  FROM public.anon_claim_update(6001, 30);
+  IF NOT v_claimed OR v_state <> 'claimed' THEN
+    RAISE EXCEPTION 'new update lease was not claimed';
+  END IF;
+
+  SELECT claimed, state INTO v_claimed, v_state
+  FROM public.anon_claim_update(6001, 30);
+  IF v_claimed OR v_state <> 'processing' THEN
+    RAISE EXCEPTION 'active update lease did not block duplicate processing';
+  END IF;
+
+  IF NOT public.anon_complete_update(6001) THEN
+    RAISE EXCEPTION 'update lease could not be completed';
+  END IF;
+
+  SELECT claimed, state INTO v_claimed, v_state
+  FROM public.anon_claim_update(6001, 30);
+  IF v_claimed OR v_state <> 'processed' THEN
+    RAISE EXCEPTION 'completed update was not deduplicated';
+  END IF;
+
+  SELECT claimed, state INTO v_claimed, v_state
+  FROM public.anon_claim_update(6002, 30);
+  IF NOT v_claimed THEN
+    RAISE EXCEPTION 'recoverable update lease was not initially claimed';
+  END IF;
+
+  UPDATE public.anon_processed_updates
+  SET lease_until = now() - interval '1 second'
+  WHERE update_id = 6002;
+
+  SELECT claimed, state INTO v_claimed, v_state
+  FROM public.anon_claim_update(6002, 30);
+  IF NOT v_claimed OR v_state <> 'claimed' THEN
+    RAISE EXCEPTION 'expired update lease was not recovered';
+  END IF;
+
   INSERT INTO public.anon_album_buffer (
     source_chat_id, destination_chat_id, sender_user_id, direction,
     media_group_id, message_id, reply_to_message_id, last_seen_at
