@@ -912,7 +912,10 @@ async def relay_album_to_user(m, uid, reply_to=None):
         )
         return
 
-    user = await get_user(uid)
+    try:
+        user = await get_user(uid)
+    except Exception:
+        user = None
     await technical(
         "message.admin_album_to_user_sent",
         alias=user.get("alias") if user else None,
