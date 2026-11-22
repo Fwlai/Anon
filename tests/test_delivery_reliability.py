@@ -64,10 +64,11 @@ class RetentionCleanupTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "technical", new=AsyncMock()):
             await main.cleanup_old_records_if_due()
 
-        self.assertEqual(db_delete.await_count, 2)
+        self.assertEqual(db_delete.await_count, 3)
         calls = db_delete.await_args_list
         self.assertEqual(calls[0].args[0], "anon_processed_updates")
         self.assertEqual(calls[1].args[0], "anon_album_buffer")
+        self.assertEqual(calls[2].args[0], "anon_album_routes")
         for call in calls:
             self.assertIn("created_at", call.args[1])
             self.assertTrue(call.args[1]["created_at"].startswith("lt."))
