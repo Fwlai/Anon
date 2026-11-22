@@ -1,0 +1,152 @@
+INSERT INTO public.anon_users (telegram_user_id, alias)
+VALUES (123, 'Blue-01'), (456, 'Red-02');
+
+SET ROLE service_role;
+
+DO $$
+DECLARE
+  v_count integer;
+  v_recipient bigint;
+  v_reply bigint;
+BEGIN
+  INSERT INTO public.anon_album_buffer (
+    source_chat_id, destination_chat_id, sender_user_id, direction,
+    media_group_id, message_id, reply_to_message_id, last_seen_at
+  ) VALUES
+    (123, -1004323044570, 123, 'user_to_admin', 'user-album-1', 101, 700,
+     now() - interval '3 seconds'),
+    (123, -1004323044570, 123, 'user_to_admin', 'user-album-1', 102, 700,
+     now() - interval '3 seconds');
+
+  SELECT count(*) INTO v_count
+  FROM public.anon_claim_album(123, -1004323044570, 'user-album-1', 1);
+  IF v_count <> 2 THEN
+    RAISE EXCEPTION 'expected two claimed user album items, got %', v_count;
+  END IF;
+
+  INSERT INTO public.anon_album_buffer (
+    source_chat_id, destination_chat_id, sender_user_id, direction,
+    media_group_id, message_id, last_seen_at
+  ) VALUES (
+    123, -1004323044570, 123, 'user_to_admin', 'user-album-1', 103, now()
+  );
+
+  SELECT count(*) INTO v_count
+  FROM public.anon_album_buffer
+  WHERE source_chat_id = 123
+    AND destination_chat_id = -1004323044570
+    AND media_group_id = 'user-album-1';
+  IF v_count <> 2 THEN
+    RAISE EXCEPTION 'late part created a second album row';
+  END IF;
+
+  PERFORM public.anon_finish_album(
+    123,
+    -1004323044570,
+    'user-album-1',
+    '[{"source_message_id":101,"destination_message_id":901},
+      {"source_message_id":102,"destination_message_id":902}]'::jsonb,
+    'delivered'
+  );
+
+  SELECT count(*) INTO v_count
+  FROM public.anon_message_map
+  WHERE sender_user_id = 123;
+  IF v_count <> 2 THEN
+    RAISE EXCEPTION 'user album mappings were not committed atomically';
+  END IF;
+
+  INSERT INTO public.anon_album_buffer (
+    source_chat_id, destination_chat_id, sender_user_id, direction,
+    media_group_id, message_id, last_seen_at
+  ) VALUES
+    (-1004323044570, 123, 123, 'admin_to_user', 'admin-album-1', 201,
+     now() - interval '3 seconds'),
+    (-1004323044570, 123, 123, 'admin_to_user', 'admin-album-1', 202,
+     now() - interval '3 seconds');
+
+  SELECT count(*) INTO v_count
+  FROM public.anon_claim_album(-1004323044570, 123, 'admin-album-1', 1);
+  IF v_count <> 2 THEN
+    RAISE EXCEPTION 'expected two claimed admin album items, got %', v_count;
+  END IF;
+
+  PERFORM public.anon_finish_album(
+    -1004323044570,
+    123,
+    'admin-album-1',
+    '[{"source_message_id":201,"destination_message_id":301},
+      {"source_message_id":202,"destination_message_id":302}]'::jsonb,
+    'delivered'
+  );
+
+  SELECT count(*) INTO v_count
+  FROM public.anon_outbound_map
+  WHERE sender_user_id = 123;
+  IF v_count <> 2 THEN
+    RAISE EXCEPTION 'admin album outbound mappings were not committed';
+  END IF;
+
+  SELECT recipient_user_id, reply_to_message_id
+    INTO v_recipient, v_reply
+  FROM public.anon_reserve_admin_album_route(
+    -1004323044570, 'route-race', 123, 55
+  );
+  IF v_recipient <> 123 OR v_reply <> 55 THEN
+    RAISE EXCEPTION 'first album route reservation is incorrect';
+  END IF;
+
+  SELECT recipient_user_id, reply_to_message_id
+    INTO v_recipient, v_reply
+  FROM public.anon_reserve_admin_album_route(
+    -1004323044570, 'route-race', 456, 66
+  );
+  IF v_recipient <> 123 OR v_reply <> 55 THEN
+    RAISE EXCEPTION 'album route reservation changed recipient or reply target';
+  END IF;
+
+  INSERT INTO public.anon_album_buffer (
+    source_chat_id, destination_chat_id, sender_user_id, direction,
+    media_group_id, message_id, last_seen_at
+  ) VALUES (
+    123, -1004323044570, 123, 'user_to_admin', 'invalid-map', 401,
+    now() - interval '3 seconds'
+  );
+
+  SELECT count(*) INTO v_count
+  FROM public.anon_claim_album(123, -1004323044570, 'invalid-map', 1);
+  IF v_count <> 1 THEN
+    RAISE EXCEPTION 'invalid mapping test album was not claimed';
+  END IF;
+
+  BEGIN
+    PERFORM public.anon_finish_album(
+      123, -1004323044570, 'invalid-map',
+      '[]'::jsonb, 'delivered'
+    );
+    RAISE EXCEPTION 'expected invalid mapping count to fail';
+  EXCEPTION WHEN OTHERS THEN
+    IF SQLERRM = 'expected invalid mapping count to fail' THEN
+      RAISE;
+    END IF;
+  END;
+
+  SELECT count(*) INTO v_count
+  FROM public.anon_album_buffer
+  WHERE source_chat_id = 123
+    AND destination_chat_id = -1004323044570
+    AND media_group_id = 'invalid-map'
+    AND status = 'processing';
+  IF v_count <> 1 THEN
+    RAISE EXCEPTION 'failed mapping changed album processing state';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND indexname = 'anon_album_buffer_created_at_idx'
+  ) THEN
+    RAISE EXCEPTION 'album retention index is missing';
+  END IF;
+END
+$$;
