@@ -6,7 +6,7 @@ Anonymous Telegram relay with an admin-only inbox and chat switching.
 - Permanent unique color aliases (40 colors × 100 numbers)
 - Admin chat controls: `/i Alias` opens a conversation; `/c` closes it
 - Technical logs are sent only to a registered group, each in a `Log` code block
-- Register the log group with `/setlog` after adding the bot as an administrator
+- Technical logs are restricted to the pre-registered group; the bot leaves all other groups automatically
 - Open a conversation with `/i Alias`; close the selected chat with `/c`
 - New-message notifications hide text previews behind Telegram spoilers and use media labels (image, album, video, voice, GIF, file, etc.)
 - Incoming messages are copied into the admin chat only when the conversation is open; otherwise they remain unread until opened
@@ -20,7 +20,6 @@ Anonymous Telegram relay with an admin-only inbox and chat switching.
 
 ## Commands (admin only)
 - `/i Alias` — open/switch chat and deliver unread messages
-- `/setlog` — register the current group as the technical log destination (run as the configured admin; bot must be a group admin)
 - `/c` — close current chat
 - `/block Alias` and `/unblock Alias` — moderation
 
@@ -31,11 +30,8 @@ Anonymous Telegram relay with an admin-only inbox and chat switching.
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 
-## Technical log setup
-1. Create a group and add the bot.
-2. Promote the bot to administrator.
-3. Send `/setlog` in the group from the configured admin account.
-4. The bot stores the group's numeric Telegram chat ID in `anon_log_config`. Invite-link changes do not affect logging.
+## Technical log group
+The technical log destination is already registered in `anon_log_config`. The bot is intended to remain only in that group and automatically leaves any other group it is added to. The group ID is preserved in the database.
 
 Logs contain event metadata (such as alias and message type) and error notices only. Private message contents are never included in technical logs.
 
