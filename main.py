@@ -8,6 +8,7 @@ import time
 import uuid
 import asyncio
 import base64
+import binascii
 import hashlib
 import hmac
 from contextvars import ContextVar
@@ -122,7 +123,7 @@ def verify_render_webhook(headers, body):
         encoded_secret = secret[6:]
         encoded_secret += "=" * (-len(encoded_secret) % 4)
         secret_bytes = base64.b64decode(encoded_secret, validate=True)
-    except (ValueError, base64.binascii.Error):
+    except (ValueError, binascii.Error):
         return False
     signed_content = webhook_id.encode() + b"." + timestamp.encode() + b"." + body
     expected = hmac.new(secret_bytes, signed_content, hashlib.sha256).digest()
@@ -131,7 +132,7 @@ def verify_render_webhook(headers, body):
             continue
         try:
             candidate = base64.b64decode(versioned_signature[3:], validate=True)
-        except (ValueError, base64.binascii.Error):
+        except (ValueError, binascii.Error):
             continue
         if hmac.compare_digest(expected, candidate):
             return True
@@ -164,6 +165,26 @@ async def fetch_render_event_details(event_id):
         raise IntegrationError("render", "GET event", event_id=event_id,
                                http_status=response.status_code,
                                error="invalid_json_response") from None
+
+
+def sanitize_render_details(value, depth=0):
+    if depth >= 5:
+        return "[nested detail omitted]"
+    if isinstance(value, dict):
+        hidden = {"email", "user", "token", "authorization", "secret",
+                  "api_key", "password", "access_key"}
+        return {
+            str(key): sanitize_render_details(item, depth + 1)
+            for key, item in value.items()
+            if str(key).lower() not in hidden
+        }
+    if isinstance(value, list):
+        return [sanitize_render_details(item, depth + 1) for item in value[:20]]
+    if isinstance(value, str):
+        return safe_error_message(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return safe_error_message(value)
 
 
 def render_metadata():
@@ -846,7 +867,7 @@ async def render_webhook(request: Request):
         try:
             full_event = await asyncio.wait_for(fetch_render_event_details(event_id), timeout=4.5)
             if isinstance(full_event, dict):
-                platform_details = full_event.get("details", full_event)
+                platform_details = sanitize_render_details(full_event.get("details", full_event))
         except Exception as exc:
             details_error = exception_fields(exc)
 
