@@ -259,7 +259,7 @@ class ContentCopyTests(unittest.IsolatedAsyncioTestCase):
         }
 
         with patch.object(main, "db_get", new=AsyncMock(return_value=[{
-            "sender_user_id": 123,
+            "recipient_user_id": 123,
             "reply_to_message_id": 88,
         }])), patch.object(main, "get_user", new=AsyncMock(return_value={
             "telegram_user_id": 123,
@@ -271,6 +271,31 @@ class ContentCopyTests(unittest.IsolatedAsyncioTestCase):
 
         send.assert_awaited_once_with(message, 123, 88)
         state.assert_not_awaited()
+
+
+    async def test_album_route_reservation_keeps_atomic_recipient(self):
+        message = {
+            "message_id": 508,
+            "from": {"id": main.ADMIN_ID},
+            "media_group_id": "admin-album-race",
+            "photo": [{}],
+        }
+
+        with patch.object(main, "db_rpc", new=AsyncMock(return_value=[{
+            "recipient_user_id": 123,
+            "reply_to_message_id": 44,
+        }])) as db_rpc, \
+             patch.object(main, "relay_album_to_user", new=AsyncMock()) as relay:
+            await main.send_to_user(message, 999, 22)
+
+        db_rpc.assert_awaited_once_with("anon_reserve_admin_album_route", {
+            "p_source_chat_id": main.ADMIN_ID,
+            "p_media_group_id": "admin-album-race",
+            "p_candidate_user_id": 999,
+            "p_reply_to_message_id": 22,
+        })
+        relay.assert_awaited_once_with(message, 123, 44)
+
 
 
 if __name__ == "__main__":
