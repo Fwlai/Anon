@@ -117,8 +117,10 @@ async def remove_admin_keyboard():
 async def react(chat_id, message_id, emoji):
     try:
         await tg("setMessageReaction", {"chat_id": chat_id, "message_id": message_id, "reaction": [{"type": "emoji", "emoji": emoji}]})
+        return True
     except Exception:
         log.info("Reaction request failed")
+        return False
 
 async def react_status(chat_id, message_id, success):
     if message_id is not None:
@@ -189,18 +191,20 @@ async def register_log_group(message):
     if chat.get("type") not in ("group", "supergroup") or sender.get("id") != ADMIN_ID:
         return False
     try:
+        if await log_chat_id():
+            return True
         me = await tg("getMe", {})
         member = await tg("getChatMember", {"chat_id": chat["id"], "user_id": me["id"]})
         if member.get("status") not in ("administrator", "creator"):
-            await tg("sendMessage", {"chat_id": chat["id"], "text": "I need to be an administrator in this group before registration."})
+            await tg("sendMessage", {"chat_id": chat["id"], "text": "I need administrator status before registration."})
             return True
-        await db_post("anon_log_config", {"config_key": "log_chat", "chat_id": chat["id"], "registered_by": ADMIN_ID, "registered_at": datetime.now(timezone.utc).isoformat()}, "resolution=merge-duplicates,return=minimal")
-        await tg("sendMessage", {"chat_id": chat["id"], "text": "Log group registered. Technical logs will be sent here."})
+        await db_post("anon_log_config", {"config_key": "log_chat", "chat_id": chat["id"], "registered_by": ADMIN_ID, "registered_at": datetime.now(timezone.utc).isoformat()}, "resolution=ignore-duplicates,return=minimal")
+        await tg("sendMessage", {"chat_id": chat["id"], "text": "Log group registered."})
         await technical("Log group registered and ready.")
     except Exception as exc:
         log.warning("Log group registration failed (%s)", type(exc).__name__)
         try:
-            await tg("sendMessage", {"chat_id": chat["id"], "text": "Registration failed. Check bot permissions and database connection."})
+            await tg("sendMessage", {"chat_id": chat["id"], "text": "Registration failed. Check permissions and database connection."})
         except Exception:
             pass
     return True
@@ -270,6 +274,24 @@ async def handle_user(m,user):
     if m.get("media_group_id"):
         group=await db_get("anon_inbox_items",{"user_id":f"eq.{uid}","media_group_id":f"eq.{m['media_group_id']}","select":"id","limit":"10"})
     # inbox retrieval is manual via /i Alias
+
+async def edit_admin_outbound_copy(m):
+    rows=await db_get("anon_outbound_map",{"admin_message_id":f"eq.{m['message_id']}","select":"*"})
+    if not rows:
+        return False
+    mapping=rows[0]
+    uid=mapping["sender_user_id"]
+    user_mid=mapping["user_message_id"]
+    try:
+        if "text" in m:
+            await tg("editMessageText",{"chat_id":uid,"message_id":user_mid,"text":m.get("text","")})
+        else:
+            await tg("editMessageCaption",{"chat_id":uid,"message_id":user_mid,"caption":m.get("caption","")})
+        return True
+    except Exception:
+        await react(ADMIN_ID,m["message_id"],"👎")
+        await technical("ERROR: Admin edit relay failed")
+        return False
 
 async def send_to_user(m,uid,reply_to=None):
     p={"chat_id":uid,"from_chat_id":ADMIN_ID,"message_id":m["message_id"]}
@@ -449,6 +471,18 @@ async def webhook(request: Request):
         except Exception:
             log.exception("Update deduplication failed")
             raise HTTPException(status_code=503, detail="temporary failure")
+    membership = update.get("my_chat_member")
+    if membership:
+        group = membership.get("chat", {})
+        new_status = (membership.get("new_chat_member") or {}).get("status")
+        if group.get("type") in ("group", "supergroup") and new_status in ("member", "administrator"):
+            registered = await log_chat_id()
+            if registered and int(group.get("id", 0)) != registered:
+                try:
+                    await tg("leaveChat", {"chat_id": group["id"]})
+                except Exception:
+                    log.info("Could not silently leave unregistered group")
+        return {"ok": True}
     edited = update.get("edited_message")
     message = update.get("message") or edited
     if not message:
@@ -460,11 +494,25 @@ async def webhook(request: Request):
 
     chat = message.get("chat", {})
     if chat.get("type") in ("group", "supergroup"):
-        if isinstance(message.get("text"), str) and re.match(r"^/setlog(?:@\w+)?\s*$", message["text"], re.I):
+        registered = await log_chat_id()
+        if registered and int(chat.get("id", 0)) != registered:
+            try:
+                await tg("leaveChat", {"chat_id": chat["id"]})
+            except Exception:
+                log.info("Could not silently leave unregistered group")
+            return {"ok": True}
+        if not registered and isinstance(message.get("text"), str) and re.match(r"^/log(?:@\w+)?\s*$", message["text"], re.I):
             await register_log_group(message)
         return {"ok": True}
 
     if uid == ADMIN_ID:
+        if edited:
+            try:
+                await edit_admin_outbound_copy(message)
+            except Exception:
+                log.exception("Admin edit relay failed")
+                await technical("ERROR: Admin edit relay failed")
+            return {"ok": True}
         try:
             await route_admin(message)
         except Exception:
@@ -482,19 +530,22 @@ async def webhook(request: Request):
         return {"ok": True}
     text = message.get("text", "")
     if text == "/start":
-        existing = await get_user(uid)
-        if existing:
-            return {"ok": True}
         try:
-            user, created = await allocate_alias(uid)
+            existing = await get_user(uid)
+            if existing:
+                user, created = existing, False
+            else:
+                user, created = await allocate_alias(uid)
+            if created:
+                await technical("New user registered: " + user["alias"])
+            if not await react(uid, message["message_id"], "❤️"):
+                await react(uid, message["message_id"], "👎")
         except Exception:
-            log.exception("Alias allocation failed")
+            log.exception("Start flow failed")
+            await react(uid, message["message_id"], "👎")
             if update_id is not None:
                 await unmark_update(update_id)
-            raise HTTPException(status_code=503, detail="alias allocation failed")
-        if created:
-            await react(uid, message["message_id"], "❤️")
-            await technical("New user registered: " + user["alias"])
+            raise HTTPException(status_code=503, detail="start failed")
         return {"ok": True}
 
     user = await get_user(uid)
@@ -529,7 +580,7 @@ async def startup():
             await tg("setWebhook", {
                 "url": f"{base_url}/telegram/webhook",
                 "secret_token": WEBHOOK_SECRET,
-                "allowed_updates": ["message", "edited_message"]
+                "allowed_updates": ["message", "edited_message", "my_chat_member"]
             })
             await technical("Bot started. Webhook is configured.")
             log.info("Startup check and webhook setup passed")
