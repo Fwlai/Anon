@@ -743,7 +743,7 @@ async def webhook(request: Request):
     update_type = next((key for key in ("message", "edited_message", "my_chat_member")
                         if key in update), "unknown")
     await technical("telegram.update_received", notify_group=False,
-                    update_type=update_type, update_id=update_id)
+                    update_type=update_type)
     if update_id is not None:
         try:
             if not await mark_update(update_id):
@@ -863,6 +863,7 @@ async def webhook(request: Request):
 
 @app.on_event("startup")
 async def startup():
+    await technical("system.startup_started", notify_group=False)
     if all([BOT_TOKEN, ADMIN_ID, WEBHOOK_SECRET, SUPABASE_URL, SUPABASE_KEY]):
         try:
             await db_get("anon_users", {"select": "telegram_user_id", "limit": "1"})
