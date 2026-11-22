@@ -104,6 +104,16 @@ async def send_user(uid, text, parse_mode=None):
         payload["parse_mode"] = parse_mode
     return await tg("sendMessage", payload)
 
+async def remove_admin_keyboard():
+    try:
+        message = await tg("sendMessage", {"chat_id": ADMIN_ID, "text": "Keyboard removed.", "reply_markup": {"remove_keyboard": True}})
+        try:
+            await tg("deleteMessage", {"chat_id": ADMIN_ID, "message_id": message["message_id"]})
+        except Exception:
+            pass
+    except Exception:
+        log.info("Reply keyboard removal failed")
+
 async def react(chat_id, message_id, emoji):
     try:
         await tg("setMessageReaction", {"chat_id": chat_id, "message_id": message_id, "reaction": [{"type": "emoji", "emoji": emoji}]})
@@ -272,6 +282,7 @@ async def open_alias(alias,cmdid):
     if not u or u.get("blocked_by_admin"):
         await react(ADMIN_ID,cmdid,"👎"); return
     uid=u["telegram_user_id"]; await set_active(uid); await activity(uid)
+    await remove_admin_keyboard()
     await technical(f"Chat: <code>{html.escape(u['alias'])}</code>",{ "remove_keyboard": True})
     pending=await db_get("anon_inbox_items",{"user_id":f"eq.{uid}","unread":"eq.true","select":"*","order":"created_at.asc","limit":"1000"})
     ok=fail=0
