@@ -593,6 +593,8 @@ async def edit_incoming_copy(m):
         user = await get_user(uid)
         await technical("message.edit_relay_failed", "ERROR", direction="user_to_admin",
                         alias=user.get("alias") if user else None, **exception_fields(exc))
+        if not telegram_permanent_rejection(exc):
+            raise
 
 async def claim_album_messages(m, sender_uid, destination_uid, direction, reply_to=None):
     source_uid = ADMIN_ID if direction == "admin_to_user" else sender_uid
@@ -1087,6 +1089,8 @@ async def edit_admin_outbound_copy(m):
         await react(ADMIN_ID,m["message_id"],"👎")
         await technical("message.admin_edit_relay_failed", "ERROR",
                         admin_message_id=m["message_id"], **exception_fields(exc))
+        if not telegram_permanent_rejection(exc):
+            raise
         return False
 
 async def send_to_user(m,uid,reply_to=None):
@@ -1615,6 +1619,10 @@ async def webhook(request: Request):
                 await technical("message.admin_edit_relay_failed", "ERROR",
                                 admin_message_id=message.get("message_id"),
                                 **exception_fields(exc))
+                if not telegram_permanent_rejection(exc):
+                    if update_id is not None:
+                        await unmark_update(update_id, lease_token)
+                    raise HTTPException(status_code=503, detail="admin edit relay failed")
             return await ack_update(update_id, lease_token)
         try:
             await route_admin(message)
@@ -1629,6 +1637,10 @@ async def webhook(request: Request):
             await edit_incoming_copy(message)
         except Exception as exc:
             await technical("message.incoming_edit_handler_failed", "ERROR", **exception_fields(exc))
+            if not telegram_permanent_rejection(exc):
+                if update_id is not None:
+                    await unmark_update(update_id, lease_token)
+                raise HTTPException(status_code=503, detail="incoming edit relay failed")
         return await ack_update(update_id, lease_token)
     text = message.get("text", "")
     if text == "/start":
