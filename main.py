@@ -525,7 +525,7 @@ async def technical(event, level="INFO", notify_group=True, **details):
             text = json.dumps(record, ensure_ascii=False, indent=2)
         # Backtick-escape code fence markers inside JSON strings to preserve the Markdown block.
         safe_json = text.replace("```", "\\u0060\\u0060\\u0060")
-        event_label = str(event).replace("`", "\\`")
+        event_label = re.sub(r"[^A-Za-z0-9_.:-]", "_", str(event))[:120] or "unknown"
         rich_markdown = (
             f"` {event_label} `\n\n"
             f"```json\n{safe_json}\n```"
