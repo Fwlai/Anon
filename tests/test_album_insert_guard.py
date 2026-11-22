@@ -47,12 +47,14 @@ class AlbumInsertRaceFallbackTests(unittest.IsolatedAsyncioTestCase):
             "photo": [{}],
         }
 
-        with patch.object(main, "db_get", new=AsyncMock(return_value=[])), \\
-             patch.object(main, "db_post", new=AsyncMock(return_value=[])) as db_post, \\
-             patch.object(main, "db_patch", new=AsyncMock(return_value=[])) as db_patch, \\
-             patch.object(main, "db_rpc", new=AsyncMock(return_value=[])) as db_rpc, \\
-             patch.object(main.asyncio, "sleep", new=AsyncMock()), \\
-             patch.object(main, "technical", new=AsyncMock()):
+        with (
+            patch.object(main, "db_get", new=AsyncMock(return_value=[])),
+            patch.object(main, "db_post", new=AsyncMock(return_value=[])) as db_post,
+            patch.object(main, "db_patch", new=AsyncMock(return_value=[])) as db_patch,
+            patch.object(main, "db_rpc", new=AsyncMock(return_value=[])) as db_rpc,
+            patch.object(main.asyncio, "sleep", new=AsyncMock()),
+            patch.object(main, "technical", new=AsyncMock()),
+        ):
             source, group_id, rows = await main.claim_album_messages(
                 message, 123, main.ADMIN_ID, "user_to_admin"
             )
