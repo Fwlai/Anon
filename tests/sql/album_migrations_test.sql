@@ -13,6 +13,22 @@ DECLARE
   v_token uuid;
   v_next_token uuid;
 BEGIN
+  IF has_table_privilege('anon', 'public.anon_processed_updates', 'SELECT') THEN
+    RAISE EXCEPTION 'anon role can read processed update leases';
+  END IF;
+
+  IF has_function_privilege(
+    'anon', 'public.anon_claim_update(bigint,integer)', 'EXECUTE'
+  ) THEN
+    RAISE EXCEPTION 'anon role can execute the update claim function';
+  END IF;
+
+  IF NOT has_table_privilege(
+    'service_role', 'public.anon_processed_updates', 'SELECT'
+  ) THEN
+    RAISE EXCEPTION 'service_role cannot access processed update leases';
+  END IF;
+
   SELECT claimed, state, lease_token
     INTO v_claimed, v_state, v_token
   FROM public.anon_claim_update(6000, 30);
