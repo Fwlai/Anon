@@ -527,8 +527,9 @@ async def technical(event, level="INFO", notify_group=True, **details):
         safe_json = text.replace("```", "\\u0060\\u0060\\u0060")
         event_label = re.sub(r"[^A-Za-z0-9_.:-]", "_", str(event))[:120] or "unknown"
         rich_markdown = (
-            f"` {event_label} `\n\n"
-            f"```json\n{safe_json}\n```"
+            f"<details><summary><code>{event_label}</code></summary>\n\n"
+            f"```json\n{safe_json}\n```\n"
+            f"</details>"
         )
         try:
             await tg("sendRichMessage", {
