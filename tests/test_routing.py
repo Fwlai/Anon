@@ -250,5 +250,28 @@ class ContentCopyTests(unittest.IsolatedAsyncioTestCase):
         map_outbound.assert_awaited_once_with(902, 123, 602)
 
 
+    async def test_admin_album_keeps_recipient_selected_by_first_album_item(self):
+        message = {
+            "message_id": 507,
+            "from": {"id": main.ADMIN_ID},
+            "media_group_id": "admin-album",
+            "photo": [{}],
+        }
+
+        with patch.object(main, "db_get", new=AsyncMock(return_value=[{
+            "sender_user_id": 123,
+            "reply_to_message_id": 88,
+        }])), patch.object(main, "get_user", new=AsyncMock(return_value={
+            "telegram_user_id": 123,
+            "alias": "Blue-01",
+            "blocked_by_admin": False,
+        })), patch.object(main, "send_to_user", new=AsyncMock()) as send, \
+             patch.object(main, "admin_state", new=AsyncMock()) as state:
+            await main.route_admin(message)
+
+        send.assert_awaited_once_with(message, 123, 88)
+        state.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()
