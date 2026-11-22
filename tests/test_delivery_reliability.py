@@ -83,5 +83,25 @@ class RetentionCleanupTests(unittest.IsolatedAsyncioTestCase):
         db_delete.assert_not_awaited()
 
 
-if __name__ == "__main__":
+    async def test_ambiguous_single_message_copy_is_not_replayed(self):
+        recent = datetime.now(timezone.utc).isoformat()
+        failure = main.IntegrationError(
+            "telegram", "copyMessage", transport_error="ReadTimeout"
+        )
+
+        with patch.object(main, "db_get", new=AsyncMock(return_value=[
+            {"last_message_at": recent}
+        ])), patch.object(main, "tg", new=AsyncMock(side_effect=failure)) as tg, \
+             patch.object(main, "react_status", new=AsyncMock()) as react_status, \
+             patch.object(main, "technical", new=AsyncMock()) as technical:
+            await main.relay_live({
+                "message_id": 106,
+                "from": {"id": 123},
+                "text": "outcome may be unknown",
+            }, {"alias": "Blue-01"})
+
+        tg.assert_awaited_once()
+        react_status.assert_awaited_once_with(123, 106, False)
+        technical.assert_awaited_once()
+
     unittest.main()
