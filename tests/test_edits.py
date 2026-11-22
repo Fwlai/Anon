@@ -184,7 +184,7 @@ class EditWebhookRetryTests(unittest.IsolatedAsyncioTestCase):
         await self._post_edited_message(123, "edit_incoming_copy")
 
     async def test_admin_edit_rate_limit_returns_retryable_webhook_response(self):
-        await self._post_edited_message(main.ADMIN_ID, "edit_admin_outbound_copy")
+        await self._post_edited_message(777, "edit_admin_outbound_copy")
 
 
 if __name__ == "__main__":
