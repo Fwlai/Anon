@@ -71,3 +71,50 @@ BEGIN
 END
 $$;
 SQL
+
+(
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+BEGIN;
+SET ROLE service_role;
+DO $$
+DECLARE
+  v_recipient bigint;
+BEGIN
+  SELECT recipient_user_id INTO v_recipient
+  FROM public.anon_reserve_admin_album_route(
+    -1004323044570, 'concurrent-route-reservation', 123, 55
+  );
+  IF v_recipient <> 123 THEN
+    RAISE EXCEPTION 'first route reservation chose the wrong recipient';
+  END IF;
+END
+$$;
+SELECT pg_sleep(2);
+COMMIT;
+SQL
+) &
+route_pid=$!
+
+sleep 0.2
+
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+SET ROLE service_role;
+DO $$
+DECLARE
+  v_recipient bigint;
+  v_reply bigint;
+BEGIN
+  SELECT recipient_user_id, reply_to_message_id
+    INTO v_recipient, v_reply
+  FROM public.anon_reserve_admin_album_route(
+    -1004323044570, 'concurrent-route-reservation', 456, 66
+  );
+
+  IF v_recipient <> 123 OR v_reply <> 55 THEN
+    RAISE EXCEPTION 'concurrent route reservation split recipient or reply context';
+  END IF;
+END
+$$;
+SQL
+
+wait "$route_pid"
