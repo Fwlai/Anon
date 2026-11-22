@@ -270,6 +270,36 @@ async def db_post(table, payload, prefer="return=representation", params=None):
                                error="invalid_json_response") from None
 
 
+async def db_rpc(function, payload):
+    try:
+        r = await client.post(
+            f"{REST}/rpc/{function}",
+            json=payload,
+            headers=db_headers("return=representation"),
+        )
+    except httpx.HTTPError as exc:
+        raise IntegrationError(
+            "supabase", f"RPC {function}", transport_error=type(exc).__name__
+        ) from None
+    if r.status_code >= 400:
+        try:
+            error = r.json()
+        except ValueError:
+            error = {}
+        raise IntegrationError(
+            "supabase", f"RPC {function}", http_status=r.status_code,
+            error_code=error.get("code"),
+            error=safe_error_message(error.get("message")),
+        )
+    try:
+        return r.json() if r.content else None
+    except ValueError:
+        raise IntegrationError(
+            "supabase", f"RPC {function}", http_status=r.status_code,
+            error="invalid_json_response",
+        ) from None
+
+
 async def db_patch(table, params, payload):
     try:
         r = await client.patch(f"{REST}/{table}", params=params, json=payload, headers=db_headers())
@@ -491,7 +521,248 @@ async def edit_incoming_copy(m):
         await technical("message.edit_relay_failed", "ERROR", direction="user_to_admin",
                         alias=user.get("alias") if user else None, **exception_fields(exc))
 
+async def claim_album_messages(m, sender_uid, destination_uid, direction, reply_to=None):
+    source_uid = ADMIN_ID if direction == "admin_to_user" else sender_uid
+    group_id = str(m["media_group_id"])
+    now = datetime.now(timezone.utc).isoformat()
+    params = {
+        "on_conflict": "source_chat_id,destination_chat_id,media_group_id,message_id"
+    }
+    await db_post(
+        "anon_album_buffer",
+        {
+            "source_chat_id": source_uid,
+            "destination_chat_id": destination_uid,
+            "sender_user_id": sender_uid,
+            "direction": direction,
+            "media_group_id": group_id,
+            "message_id": m["message_id"],
+            "reply_to_message_id": reply_to,
+            "last_seen_at": now,
+        },
+        "resolution=ignore-duplicates,return=minimal",
+        params,
+    )
+    await db_patch(
+        "anon_album_buffer",
+        {
+            "source_chat_id": f"eq.{source_uid}",
+            "destination_chat_id": f"eq.{destination_uid}",
+            "media_group_id": f"eq.{group_id}",
+            "status": "eq.pending",
+        },
+        {"last_seen_at": now},
+    )
+
+    for delay in (1.2, 0.5, 0.5, 0.5):
+        await asyncio.sleep(delay)
+        rows = await db_rpc("anon_claim_album", {
+            "p_source_chat_id": source_uid,
+            "p_destination_chat_id": destination_uid,
+            "p_media_group_id": group_id,
+            "p_quiet_seconds": 1,
+        })
+        if rows:
+            if any(
+                row["sender_user_id"] != sender_uid or row["direction"] != direction
+                for row in rows
+            ):
+                await db_rpc("anon_finish_album", {
+                    "p_source_chat_id": source_uid,
+                    "p_destination_chat_id": destination_uid,
+                    "p_media_group_id": group_id,
+                    "p_mappings": None,
+                    "p_status": "pending",
+                })
+                raise RuntimeError("Album buffer contains inconsistent routing data")
+            return source_uid, group_id, rows
+    return source_uid, group_id, []
+
+
+async def finish_album(source_uid, destination_uid, group_id, mappings=None, status="delivered"):
+    return await db_rpc("anon_finish_album", {
+        "p_source_chat_id": source_uid,
+        "p_destination_chat_id": destination_uid,
+        "p_media_group_id": group_id,
+        "p_mappings": mappings,
+        "p_status": status,
+    })
+
+
+async def relay_album_to_admin(m, user, reply_to=None):
+    uid = m["from"]["id"]
+    source_uid, group_id, rows = await claim_album_messages(
+        m, uid, ADMIN_ID, "user_to_admin", reply_to
+    )
+    if not rows:
+        return
+
+    message_ids = sorted(row["message_id"] for row in rows)
+    sessions = await db_get(
+        "anon_admin_sessions",
+        {"sender_user_id": f"eq.{uid}", "select": "*"},
+    )
+    now = datetime.now(timezone.utc)
+    header = not sessions
+    if sessions:
+        last = datetime.fromisoformat(
+            sessions[0]["last_message_at"].replace("Z", "+00:00")
+        )
+        header = (now - last).total_seconds() >= 600
+
+    if header:
+        sent_header = await tg("sendMessage", {
+            "chat_id": ADMIN_ID,
+            "text": f'<blockquote>Chat: <code>{html.escape(user["alias"])}</code></blockquote>',
+            "parse_mode": "HTML",
+        })
+        try:
+            await map_admin_message(sent_header["message_id"], uid)
+        except Exception as exc:
+            await technical(
+                "message.album_header_mapping_failed", "ERROR",
+                alias=user["alias"], message_delivered=True,
+                **exception_fields(exc),
+            )
+
+    try:
+        copied = await tg("copyMessages", {
+            "chat_id": ADMIN_ID,
+            "from_chat_id": source_uid,
+            "message_ids": message_ids,
+        })
+    except Exception:
+        try:
+            await finish_album(source_uid, ADMIN_ID, group_id, status="pending")
+        except Exception as persist_exc:
+            await technical(
+                "message.album_retry_state_failed", "ERROR",
+                direction="user_to_admin", alias=user["alias"],
+                **exception_fields(persist_exc),
+            )
+        raise
+
+    if not isinstance(copied, list) or len(copied) != len(message_ids):
+        await finish_album(source_uid, ADMIN_ID, group_id, status="delivered_unmapped")
+        await technical(
+            "message.album_copy_incomplete", "ERROR",
+            direction="user_to_admin", alias=user["alias"],
+            source_message_count=len(message_ids),
+            copied_message_count=len(copied) if isinstance(copied, list) else None,
+            delivery_already_attempted=True,
+        )
+        return
+
+    mappings = [
+        {
+            "source_message_id": source_id,
+            "destination_message_id": copied_item["message_id"],
+        }
+        for source_id, copied_item in zip(message_ids, copied)
+    ]
+    try:
+        await finish_album(source_uid, ADMIN_ID, group_id, mappings, "delivered")
+    except Exception as exc:
+        await technical(
+            "message.album_mapping_persistence_failed", "ERROR",
+            direction="user_to_admin", alias=user["alias"],
+            message_count=len(message_ids), delivery_already_completed=True,
+            **exception_fields(exc),
+        )
+        return
+
+    try:
+        await db_post(
+            "anon_admin_sessions",
+            {"sender_user_id": uid, "last_message_at": now.isoformat()},
+            "resolution=merge-duplicates,return=minimal",
+        )
+    except Exception as exc:
+        await technical(
+            "message.album_session_update_failed", "WARNING",
+            direction="user_to_admin", alias=user["alias"],
+            message_count=len(message_ids), delivery_already_completed=True,
+            **exception_fields(exc),
+        )
+
+    await technical(
+        "message.album_forwarded_to_admin",
+        alias=user["alias"],
+        message_count=len(message_ids),
+        source_message_ids=message_ids,
+        reply_context_omitted=any(row.get("reply_to_message_id") for row in rows),
+    )
+
+
+async def relay_album_to_user(m, uid, reply_to=None):
+    source_uid, group_id, rows = await claim_album_messages(
+        m, uid, uid, "admin_to_user", reply_to
+    )
+    if not rows:
+        return
+
+    message_ids = sorted(row["message_id"] for row in rows)
+    try:
+        copied = await tg("copyMessages", {
+            "chat_id": uid,
+            "from_chat_id": source_uid,
+            "message_ids": message_ids,
+        })
+    except Exception:
+        try:
+            await finish_album(source_uid, uid, group_id, status="pending")
+        except Exception as persist_exc:
+            await technical(
+                "message.album_retry_state_failed", "ERROR",
+                direction="admin_to_user", recipient_user_id=uid,
+                **exception_fields(persist_exc),
+            )
+        raise
+
+    if not isinstance(copied, list) or len(copied) != len(message_ids):
+        await finish_album(source_uid, uid, group_id, status="delivered_unmapped")
+        await technical(
+            "message.album_copy_incomplete", "ERROR",
+            direction="admin_to_user", recipient_user_id=uid,
+            source_message_count=len(message_ids),
+            copied_message_count=len(copied) if isinstance(copied, list) else None,
+            delivery_already_attempted=True,
+        )
+        return
+
+    mappings = [
+        {
+            "source_message_id": source_id,
+            "destination_message_id": copied_item["message_id"],
+        }
+        for source_id, copied_item in zip(message_ids, copied)
+    ]
+    try:
+        await finish_album(source_uid, uid, group_id, mappings, "delivered")
+    except Exception as exc:
+        await technical(
+            "message.album_mapping_persistence_failed", "ERROR",
+            direction="admin_to_user", recipient_user_id=uid,
+            message_count=len(message_ids), delivery_already_completed=True,
+            **exception_fields(exc),
+        )
+        return
+
+    user = await get_user(uid)
+    await technical(
+        "message.admin_album_to_user_sent",
+        alias=user.get("alias") if user else None,
+        message_count=len(message_ids),
+        source_message_ids=message_ids,
+        reply_context_omitted=any(row.get("reply_to_message_id") for row in rows),
+    )
+
+
 async def relay_live(m,user,reply_to=None):
+    if m.get("media_group_id"):
+        await relay_album_to_admin(m, user, reply_to)
+        return
+
     uid=m["from"]["id"]; now=datetime.now(timezone.utc)
     sessions=await db_get("anon_admin_sessions",{"sender_user_id":f"eq.{uid}","select":"*"})
     header=not sessions
@@ -571,6 +842,10 @@ async def edit_admin_outbound_copy(m):
         return False
 
 async def send_to_user(m,uid,reply_to=None):
+    if m.get("media_group_id"):
+        await relay_album_to_user(m, uid, reply_to)
+        return
+
     p={"chat_id":uid,"from_chat_id":ADMIN_ID,"message_id":m["message_id"]}
     if reply_to: p["reply_parameters"]={"message_id":reply_to}
     cp=await tg("copyMessage",p)
@@ -611,6 +886,8 @@ async def route_admin(m):
                     await technical("message.admin_reply_delivery_failed", "ERROR",
                                     admin_message_id=m["message_id"], **exception_fields(exc))
                     await react(ADMIN_ID,m["message_id"],"👎")
+                    if m.get("media_group_id"):
+                        raise
             else:
                 await react(ADMIN_ID,m["message_id"],"👎")
             return
@@ -648,6 +925,8 @@ async def route_admin(m):
                 await technical("message.admin_delivery_failed", "ERROR",
                                 admin_message_id=m["message_id"], **exception_fields(exc))
                 await react(ADMIN_ID,m["message_id"],"👎")
+                if m.get("media_group_id"):
+                    raise
         else:
             await react(ADMIN_ID,m["message_id"],"👎")
         return
