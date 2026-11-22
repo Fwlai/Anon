@@ -181,7 +181,8 @@ async def technical(text, reply_markup=None):
             log.info("TECH_LOG (group not registered): %s", text)
             return
         fence = chr(96) * 3
-        await tg("sendMessage", {"chat_id": chat_id, "text": fence + "\nLog\n" + str(text) + "\n" + fence})
+        log_text = html.unescape(re.sub(r"<[^>]+>", "", str(text)))
+        await tg("sendMessage", {"chat_id": chat_id, "text": fence + "Log\n" + log_text + "\n" + fence, "parse_mode": "Markdown"})
     except Exception as exc:
         log.warning("Technical log delivery failed (%s)", type(exc).__name__)
 
