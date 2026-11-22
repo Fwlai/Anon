@@ -1549,6 +1549,15 @@ async def webhook(request: Request):
             if not claim.get("claimed"):
                 if claim.get("state") == "processed":
                     return {"ok": True, "duplicate": True}
+                if claim.get("state") == "unknown":
+                    await technical(
+                        "telegram.update_lease_expired_unknown",
+                        "ERROR",
+                        notify_group=False,
+                        update_id=update_id,
+                        automatic_retry_suppressed=True,
+                    )
+                    return {"ok": True, "unknown": True}
                 raise HTTPException(
                     status_code=503,
                     detail="Telegram update claim is not available yet",
