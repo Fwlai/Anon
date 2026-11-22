@@ -202,5 +202,64 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+    async def test_album_rate_limit_retry_does_not_duplicate_header(self):
+        message = {
+            "message_id": 306,
+            "from": {"id": 123},
+            "media_group_id": "album-header-retry",
+            "photo": [{}],
+        }
+        buffered = [{
+            "sender_user_id": 123,
+            "direction": "user_to_admin",
+            "message_id": 306,
+            "reply_to_message_id": None,
+        }]
+        recent = main.datetime.now(main.timezone.utc).isoformat()
+        rate_limit = main.IntegrationError(
+            "telegram", "copyMessages", error_code=429, http_status=200
+        )
+
+        with (
+            patch.object(main, "claim_album_messages", new=AsyncMock(
+                return_value=(123, "album-header-retry", buffered)
+            )),
+            patch.object(main, "db_get", new=AsyncMock(side_effect=[
+                [], [{"last_message_at": recent}]
+            ])),
+            patch.object(main, "tg", new=AsyncMock(side_effect=[
+                {"message_id": 900},
+                rate_limit,
+                [{"message_id": 901}],
+            ])) as tg,
+            patch.object(main, "map_admin_message", new=AsyncMock()) as map_header,
+            patch.object(main, "db_post", new=AsyncMock()) as db_post,
+            patch.object(main, "finish_album", new=AsyncMock()) as finish,
+            patch.object(main, "technical", new=AsyncMock()),
+        ):
+            with self.assertRaises(main.IntegrationError):
+                await main.relay_album_to_admin(message, {
+                    "telegram_user_id": 123, "alias": "Blue-01"
+                })
+
+            await main.relay_album_to_admin(message, {
+                "telegram_user_id": 123, "alias": "Blue-01"
+            })
+
+        header_calls = [
+            call for call in tg.await_args_list
+            if call.args[0] == "sendMessage"
+        ]
+        album_calls = [
+            call for call in tg.await_args_list
+            if call.args[0] == "copyMessages"
+        ]
+        self.assertEqual(len(header_calls), 1)
+        self.assertEqual(len(album_calls), 2)
+        map_header.assert_awaited_once_with(900, 123)
+        self.assertEqual(db_post.await_count, 2)
+        self.assertEqual(finish.await_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
