@@ -7,7 +7,7 @@ Anon writes structured JSON records to Render stdout and forwards technical even
 Telegram log notifications use the official Bot API `sendRichMessage` method with an `InputRichMessage.markdown` payload.
 
 Each notification contains:
-- A compact inline-code event name as its heading
+- A compact inline-code event name as its heading; event names are normalized to a restricted character set so untrusted values cannot inject Markdown or extra lines
 - The complete structured event record in a fenced `json` code block
 - Syntax-language metadata (`json`) so supported Telegram clients can render the record as formatted code
 
