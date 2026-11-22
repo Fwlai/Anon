@@ -48,3 +48,5 @@ REVOKE ALL ON FUNCTION public.anon_guard_album_buffer_insert()
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.anon_guard_album_buffer_insert()
   TO service_role;
+
+NOTIFY pgrst, 'reload schema';
