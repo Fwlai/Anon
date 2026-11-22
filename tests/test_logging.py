@@ -73,10 +73,12 @@ class StructuredLogTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("rich_message", tg_mock.await_args.args[1])
         self.assertNotIn("entities", tg_mock.await_args.args[1])
         markdown = tg_mock.await_args.args[1]["rich_message"]["markdown"]
+        self.assertTrue(markdown.startswith(
+            "<details><summary><code>test.event</code></summary>\n\n```json\n"
+        ))
+        self.assertTrue(markdown.endswith("\n```\n</details>"))
         self.assertNotIn("Anon Log", markdown)
         self.assertNotIn("**INFO**", markdown)
-        self.assertIn("` test.event `", markdown)
-        self.assertIn("```json", markdown)
 
     async def test_event_heading_cannot_inject_markdown_or_new_lines(self):
         with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)), \
@@ -86,7 +88,10 @@ class StructuredLogTests(unittest.IsolatedAsyncioTestCase):
 
         markdown = tg_mock.await_args.args[1]["rich_message"]["markdown"]
         self.assertEqual(markdown.count("```"), 2)
-        self.assertEqual(markdown.splitlines()[0], "` bad_event____json `")
+        self.assertTrue(markdown.startswith(
+            "<details><summary><code>bad_event____json</code></summary>"
+        ))
+        self.assertTrue(markdown.endswith("\n```\n</details>"))
 
     async def test_json_code_fence_inside_detail_does_not_break_markdown(self):
         original = {"snippet": "before ```json\nafter"}
@@ -97,7 +102,7 @@ class StructuredLogTests(unittest.IsolatedAsyncioTestCase):
 
         markdown = tg_mock.await_args.args[1]["rich_message"]["markdown"]
         self.assertEqual(markdown.count("```"), 2)
-        json_text = markdown.split("```json\n", 1)[1].rsplit("\n```", 1)[0]
+        json_text = markdown.split("```json\n", 1)[1].rsplit("\n```\n</details>", 1)[0]
         record = json.loads(json_text)
         self.assertEqual(record["details"]["payload"], original)
 
@@ -108,7 +113,7 @@ class StructuredLogTests(unittest.IsolatedAsyncioTestCase):
             await main.technical("test.large", "ERROR", huge_value="x" * 5000)
 
         markdown = tg_mock.await_args.args[1]["rich_message"]["markdown"]
-        json_text = markdown.split("```json\n", 1)[1].rsplit("\n```", 1)[0]
+        json_text = markdown.split("```json\n", 1)[1].rsplit("\n```\n</details>", 1)[0]
         record = json.loads(json_text)
         self.assertTrue(record["details"]["truncated"])
         self.assertEqual(record["details"]["available_fields"], ["huge_value"])
