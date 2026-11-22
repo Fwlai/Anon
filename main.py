@@ -715,12 +715,21 @@ async def relay_album_to_admin(m, user, reply_to=None):
                 **exception_fields(exc),
             )
 
+    copy_payload = {
+        "chat_id": ADMIN_ID,
+        "from_chat_id": source_uid,
+        "message_ids": message_ids,
+    }
+    reply_target = next(
+        (row.get("reply_to_message_id") for row in rows
+         if row.get("reply_to_message_id")),
+        None,
+    )
+    if reply_target:
+        copy_payload["reply_parameters"] = {"message_id": reply_target}
+
     try:
-        copied = await tg("copyMessages", {
-            "chat_id": ADMIN_ID,
-            "from_chat_id": source_uid,
-            "message_ids": message_ids,
-        })
+        copied = await tg("copyMessages", copy_payload)
     except Exception as exc:
         if telegram_rate_limited(exc):
             try:
@@ -829,12 +838,21 @@ async def relay_album_to_user(m, uid, reply_to=None):
         return
 
     message_ids = sorted(row["message_id"] for row in rows)
+    copy_payload = {
+        "chat_id": uid,
+        "from_chat_id": source_uid,
+        "message_ids": message_ids,
+    }
+    reply_target = next(
+        (row.get("reply_to_message_id") for row in rows
+         if row.get("reply_to_message_id")),
+        None,
+    )
+    if reply_target:
+        copy_payload["reply_parameters"] = {"message_id": reply_target}
+
     try:
-        copied = await tg("copyMessages", {
-            "chat_id": uid,
-            "from_chat_id": source_uid,
-            "message_ids": message_ids,
-        })
+        copied = await tg("copyMessages", copy_payload)
     except Exception as exc:
         if telegram_rate_limited(exc):
             try:
