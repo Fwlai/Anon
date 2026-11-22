@@ -21,7 +21,7 @@ BEGIN
 EXCEPTION WHEN duplicate_object THEN
   NULL;
 END;
-$;
+$$;
 
 CREATE INDEX IF NOT EXISTS anon_processed_updates_processing_lease_idx
   ON public.anon_processed_updates (lease_until)
