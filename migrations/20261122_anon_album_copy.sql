@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS public.anon_album_routes (
 );
 
 ALTER TABLE public.anon_album_routes ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON public.anon_album_routes FROM anon, authenticated;
+REVOKE ALL ON public.anon_album_routes FROM PUBLIC, anon, authenticated;
 GRANT ALL ON public.anon_album_routes TO service_role;
 
 CREATE OR REPLACE FUNCTION public.anon_reserve_admin_album_route(
@@ -73,7 +73,7 @@ GRANT EXECUTE ON FUNCTION public.anon_reserve_admin_album_route(bigint, text, bi
   TO service_role;
 
 ALTER TABLE public.anon_album_buffer ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON public.anon_album_buffer FROM anon, authenticated;
+REVOKE ALL ON public.anon_album_buffer FROM PUBLIC, anon, authenticated;
 GRANT ALL ON public.anon_album_buffer TO service_role;
 
 CREATE OR REPLACE FUNCTION public.anon_claim_album(
