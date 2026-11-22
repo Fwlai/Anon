@@ -209,6 +209,7 @@ async def edit_incoming_copy(m):
             await tg("editMessageCaption",{"chat_id":ADMIN_ID,"message_id":admin_mid,"caption":m.get("caption","")})
     except Exception:
         await react(ADMIN_ID,admin_mid,"👎")
+        await technical("ERROR: Incoming edit relay failed")
 
 async def relay_live(m,user,reply_to=None):
     uid=m["from"]["id"]; now=datetime.now(timezone.utc)
@@ -251,7 +252,9 @@ async def handle_user(m,user):
             await relay_live(m,user,mapped)
             await db_patch("anon_inbox_items",{"user_id":f"eq.{uid}","user_message_id":f"eq.{m['message_id']}"},{"unread":False})
         except Exception:
-            await react_status(uid,m["message_id"],False); raise
+            await react_status(uid,m["message_id"],False)
+            await technical("ERROR: Live relay failed for " + user["alias"])
+            raise
         return
     group=[]
     if m.get("media_group_id"):
@@ -455,6 +458,7 @@ async def webhook(request: Request):
             await route_admin(message)
         except Exception:
             log.exception("Admin routing failed")
+            await technical("ERROR: Admin routing failed")
             if update_id is not None: await unmark_update(update_id)
             raise HTTPException(status_code=503, detail="admin routing failed")
         return {"ok": True}
