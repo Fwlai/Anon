@@ -1,6 +1,6 @@
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch, call
+from unittest.mock import AsyncMock, patch
 
 import main
 
