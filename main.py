@@ -711,14 +711,24 @@ async def relay_album_to_admin(m, user, reply_to=None):
             "text": f'<blockquote>Chat: <code>{html.escape(user["alias"])}</code></blockquote>',
             "parse_mode": "HTML",
         })
-        try:
-            await map_admin_message(sent_header["message_id"], uid)
-        except Exception as exc:
-            await technical(
-                "message.album_header_mapping_failed", "ERROR",
-                alias=user["alias"], message_delivered=True,
-                **exception_fields(exc),
-            )
+        await persist_after_delivery(
+            lambda: map_admin_message(sent_header["message_id"], uid),
+            "message.album_header_mapping_persistence_failed",
+            direction="user_to_admin",
+            alias=user["alias"],
+            admin_message_id=sent_header["message_id"],
+            sender_user_id=uid,
+        )
+        await persist_after_delivery(
+            lambda: db_post(
+                "anon_admin_sessions",
+                {"sender_user_id": uid, "last_message_at": now.isoformat()},
+                "resolution=merge-duplicates,return=minimal",
+            ),
+            "message.session_persistence_failed",
+            direction="user_to_admin",
+            sender_user_id=uid,
+        )
 
     copy_payload = {
         "chat_id": ADMIN_ID,
@@ -812,18 +822,17 @@ async def relay_album_to_admin(m, user, reply_to=None):
         )
         return
 
-    try:
-        await db_post(
-            "anon_admin_sessions",
-            {"sender_user_id": uid, "last_message_at": now.isoformat()},
-            "resolution=merge-duplicates,return=minimal",
-        )
-    except Exception as exc:
-        await technical(
-            "message.album_session_update_failed", "WARNING",
-            direction="user_to_admin", alias=user["alias"],
-            message_count=len(message_ids), delivery_already_completed=True,
-            **exception_fields(exc),
+    if not header:
+        await persist_after_delivery(
+            lambda: db_post(
+                "anon_admin_sessions",
+                {"sender_user_id": uid, "last_message_at": now.isoformat()},
+                "resolution=merge-duplicates,return=minimal",
+            ),
+            "message.album_session_update_failed",
+            direction="user_to_admin",
+            alias=user["alias"],
+            message_count=len(message_ids),
         )
 
     await technical(
