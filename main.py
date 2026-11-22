@@ -456,15 +456,10 @@ async def technical(event, level="INFO", notify_group=True, **details):
                 "disable_notification": level.upper() in ("INFO",),
             })
         except Exception as rich_exc:
-            # Preserve visibility if Rich Messages aren't accepted by the API.
-            await tg("sendMessage", {
-                "chat_id": chat_id,
-                "text": text,
-                "entities": [{"type": "pre", "offset": 0, "length": utf16_length(text), "language": "json"}],
-                "disable_web_page_preview": True,
-            })
+            # Avoid duplicate delivery if Telegram accepted the request but the
+            # response was lost or timed out. Rich logs are the only group format.
             write_log_record(make_log_record(
-                "logging.rich_message_fallback_used", "WARNING",
+                "logging.rich_message_delivery_failed", "WARNING",
                 source_event=event, **exception_fields(rich_exc),
             ))
     except Exception as exc:
