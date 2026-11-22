@@ -826,7 +826,7 @@ async def relay_album_to_admin(m, user, reply_to=None):
         alias=user["alias"],
         message_count=len(message_ids),
         source_message_ids=message_ids,
-        reply_context_omitted=any(row.get("reply_to_message_id") for row in rows),
+        reply_context_included=any(row.get("reply_to_message_id") for row in rows),
     )
 
 
@@ -939,7 +939,7 @@ async def relay_album_to_user(m, uid, reply_to=None):
         alias=user.get("alias") if user else None,
         message_count=len(message_ids),
         source_message_ids=message_ids,
-        reply_context_omitted=any(row.get("reply_to_message_id") for row in rows),
+        reply_context_included=any(row.get("reply_to_message_id") for row in rows),
     )
 
 
