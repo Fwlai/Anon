@@ -38,7 +38,14 @@ class RenderWebhookVerificationTests(unittest.TestCase):
 
     def test_stale_timestamp_is_rejected(self):
         headers = dict(self.headers)
-        headers["webhook-timestamp"] = str(int(time.time()) - 600)
+        stale_timestamp = str(int(time.time()) - 600)
+        signed = self.webhook_id.encode() + b"." + stale_timestamp.encode() + b"." + self.body
+        secret = base64.b64decode(main.RENDER_WEBHOOK_SECRET[6:])
+        signature = base64.b64encode(
+            hmac.new(secret, signed, hashlib.sha256).digest()
+        ).decode("ascii")
+        headers["webhook-timestamp"] = stale_timestamp
+        headers["webhook-signature"] = f"v1,{signature}"
         self.assertFalse(main.verify_render_webhook(headers, self.body))
 
     def test_unknown_signature_version_is_rejected(self):
