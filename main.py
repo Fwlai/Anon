@@ -1056,7 +1056,20 @@ async def edit_admin_outbound_copy(m):
 
 async def send_to_user(m,uid,reply_to=None):
     if m.get("media_group_id"):
-        await relay_album_to_user(m, uid, reply_to)
+        routes = await db_rpc("anon_reserve_admin_album_route", {
+            "p_source_chat_id": ADMIN_ID,
+            "p_media_group_id": str(m["media_group_id"]),
+            "p_candidate_user_id": uid,
+            "p_reply_to_message_id": reply_to,
+        })
+        if not routes:
+            raise RuntimeError("Admin album route reservation returned no recipient")
+
+        route = routes[0]
+        selected_uid = route["recipient_user_id"]
+        await relay_album_to_user(
+            m, selected_uid, route.get("reply_to_message_id")
+        )
         return
 
     p={"chat_id":uid,"from_chat_id":ADMIN_ID,"message_id":m["message_id"]}
@@ -1093,16 +1106,14 @@ async def route_admin(m):
         return
 
     if m.get("media_group_id"):
-        album_rows = await db_get("anon_album_buffer", {
+        album_rows = await db_get("anon_album_routes", {
             "source_chat_id": f"eq.{ADMIN_ID}",
             "media_group_id": f"eq.{m['media_group_id']}",
-            "direction": "eq.admin_to_user",
-            "select": "sender_user_id,reply_to_message_id",
-            "order": "created_at.asc",
+            "select": "recipient_user_id,reply_to_message_id",
             "limit": "1",
         })
         if album_rows:
-            uid = album_rows[0]["sender_user_id"]
+            uid = album_rows[0]["recipient_user_id"]
             user = await get_user(uid)
             if user and not user.get("blocked_by_admin"):
                 try:
@@ -1270,6 +1281,10 @@ async def cleanup_old_records_if_due():
             )
             await db_delete(
                 "anon_album_buffer",
+                {"created_at": f"lt.{cutoff}"},
+            )
+            await db_delete(
+                "anon_album_routes",
                 {"created_at": f"lt.{cutoff}"},
             )
             await technical(
