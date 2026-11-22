@@ -72,6 +72,11 @@ class StructuredLogTests(unittest.TestCase):
         self.assertEqual(tg_mock.await_args.args[0], "sendRichMessage")
         self.assertIn("rich_message", tg_mock.await_args.args[1])
         self.assertNotIn("entities", tg_mock.await_args.args[1])
+        markdown = tg_mock.await_args.args[1]["rich_message"]["markdown"]
+        self.assertNotIn("Anon Log", markdown)
+        self.assertNotIn("**INFO**", markdown)
+        self.assertIn("` test.event `", markdown)
+        self.assertIn("```json", markdown)
 
     def test_render_private_fields_are_removed(self):
         result = main.sanitize_render_details({
