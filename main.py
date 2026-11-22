@@ -748,7 +748,8 @@ async def rate_ok(uid):
         try:
             error = r.json()
         except ValueError:
-            error = {}        raise IntegrationError("supabase", "RPC anon_rate_check", http_status=r.status_code,
+            error = {}
+        raise IntegrationError("supabase", "RPC anon_rate_check", http_status=r.status_code,
                                error_code=error.get("code"),
                                error=safe_error_message(error.get("message")))
     try:
@@ -997,7 +998,8 @@ async def webhook(request: Request):
             await technical("telegram.start_failed", "ERROR", **exception_fields(exc))
             await react(uid, message["message_id"], "👎")
             if update_id is not None:
-                await unmark_update(update_id)            raise HTTPException(status_code=503, detail="start failed")
+                await unmark_update(update_id)
+            raise HTTPException(status_code=503, detail="start failed")
         return {"ok": True}
 
     user = await get_user(uid)
