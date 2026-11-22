@@ -298,5 +298,28 @@ class ContentCopyTests(unittest.IsolatedAsyncioTestCase):
 
 
 
+    async def test_admin_reply_rate_limit_is_retried(self):
+        message = {
+            "message_id": 509,
+            "from": {"id": main.ADMIN_ID},
+            "reply_to_message": {"message_id": 702},
+        }
+        with patch.object(main, "db_get", new=AsyncMock(return_value=[{
+            "sender_user_id": 123,
+            "user_message_id": 203,
+        }])), patch.object(main, "get_user", new=AsyncMock(return_value={
+            "alias": "Blue-01",
+            "blocked_by_admin": False,
+        })), patch.object(main, "send_to_user", new=AsyncMock(
+            side_effect=main.IntegrationError(
+                "telegram", "copyMessage", error_code=429, http_status=429
+            )
+        )), patch.object(main, "react", new=AsyncMock()), \
+             patch.object(main, "technical", new=AsyncMock()):
+            with self.assertRaises(main.IntegrationError):
+                await main.route_admin(message)
+
+
+
 if __name__ == "__main__":
     unittest.main()
