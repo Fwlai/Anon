@@ -6,6 +6,10 @@ import html
 import json
 import time
 import uuid
+import asyncio
+import base64
+import hashlib
+import hmac
 from contextvars import ContextVar
 from datetime import datetime, timezone
 
@@ -50,6 +54,9 @@ ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
 WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+RENDER_WEBHOOK_SECRET = os.getenv("RENDER_WEBHOOK_SECRET", "")
+RENDER_API_KEY = os.getenv("RENDER_API_KEY", "")
+RENDER_SERVICE_ID = os.getenv("RENDER_SERVICE_ID", "")
 
 COLORS = ["Red", "Blue", "Green", "Yellow", "Pink", "Purple", "Orange", "Brown", "Gray", "White", "Black", "Cyan", "Magenta", "Olive", "Teal", "Maroon", "Coral", "Crimson", "Gold", "Silver", "Indigo", "Violet", "Lavender", "Mint", "Lime", "Peach", "Amber", "Azure", "Navy", "Turquoise", "Rose", "Ruby", "Emerald", "Sapphire", "Lilac", "Ivory", "Charcoal", "Sky", "Plum", "Copper"]
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -94,6 +101,69 @@ def exception_fields(exc):
         if message:
             fields["message"] = message
     return fields
+
+
+def verify_render_webhook(headers, body):
+    secret = RENDER_WEBHOOK_SECRET
+    if not secret.startswith("whsec_"):
+        return False
+    webhook_id = headers.get("webhook-id", "")
+    timestamp = headers.get("webhook-timestamp", "")
+    signature_header = headers.get("webhook-signature", "")
+    if not webhook_id or not re.fullmatch(r"evt-[0-9a-z]{20}", webhook_id):
+        return False
+    if not timestamp.isdigit() or len(timestamp) > 12:
+        return False
+    if abs(time.time() - int(timestamp)) > 300:
+        return False
+    if not signature_header or len(signature_header) > 4096:
+        return False
+    try:
+        encoded_secret = secret[6:]
+        encoded_secret += "=" * (-len(encoded_secret) % 4)
+        secret_bytes = base64.b64decode(encoded_secret, validate=True)
+    except (ValueError, base64.binascii.Error):
+        return False
+    signed_content = webhook_id.encode() + b"." + timestamp.encode() + b"." + body
+    expected = hmac.new(secret_bytes, signed_content, hashlib.sha256).digest()
+    for versioned_signature in signature_header.split():
+        if not versioned_signature.startswith("v1,"):
+            continue
+        try:
+            candidate = base64.b64decode(versioned_signature[3:], validate=True)
+        except (ValueError, base64.binascii.Error):
+            continue
+        if hmac.compare_digest(expected, candidate):
+            return True
+    return False
+
+
+async def fetch_render_event_details(event_id):
+    if not RENDER_API_KEY:
+        return None
+    try:
+        response = await client.get(
+            f"https://api.render.com/v1/events/{event_id}",
+            headers={"Authorization": f"Bearer {RENDER_API_KEY}"},
+            timeout=4.0,
+        )
+    except httpx.HTTPError as exc:
+        raise IntegrationError("render", "GET event", event_id=event_id,
+                               transport_error=type(exc).__name__) from None
+    if response.status_code >= 400:
+        try:
+            error = response.json()
+        except ValueError:
+            error = {}
+        raise IntegrationError("render", "GET event", event_id=event_id,
+                               http_status=response.status_code,
+                               error=safe_error_message(error.get("message")))
+    try:
+        return response.json()
+    except ValueError:
+        raise IntegrationError("render", "GET event", event_id=event_id,
+                               http_status=response.status_code,
+                               error="invalid_json_response") from None
 
 
 def render_metadata():
@@ -728,6 +798,83 @@ async def request_observability(request: Request, call_next):
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {"service": "Anon", "status": "running"}
+
+@app.post("/render/webhook")
+async def render_webhook(request: Request):
+    if not RENDER_WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="Render webhook is not configured")
+    content_length = request.headers.get("content-length")
+    if content_length and (not content_length.isdigit() or int(content_length) > 65536):
+        raise HTTPException(status_code=413, detail="payload too large")
+    body = await request.body()
+    if len(body) > 65536:
+        raise HTTPException(status_code=413, detail="payload too large")
+    if not verify_render_webhook(request.headers, body):
+        await technical("render.webhook_rejected", "WARNING", notify_group=False,
+                        reason="invalid_signature_or_timestamp")
+        raise HTTPException(status_code=401, detail="invalid Render webhook signature")
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="invalid JSON payload")
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+        raise HTTPException(status_code=400, detail="invalid event payload")
+
+    event_data = payload["data"]
+    event_id = event_data.get("id")
+    event_type = payload.get("type")
+    if not isinstance(event_id, str) or event_id != request.headers.get("webhook-id"):
+        raise HTTPException(status_code=400, detail="event ID mismatch")
+    if not isinstance(event_type, str):
+        raise HTTPException(status_code=400, detail="missing event type")
+
+    service_id = event_data.get("serviceId")
+    if RENDER_SERVICE_ID and service_id != RENDER_SERVICE_ID:
+        await technical("render.unrelated_service_event_ignored", notify_group=False,
+                        event_id=event_id, event_type=event_type, service_id=service_id)
+        return {"ok": True, "ignored": True}
+
+    event_status = payload.get("status")
+    level = "ERROR" if event_status == "failed" or event_type in {
+        "server_failed", "server_hardware_failure", "image_pull_failed",
+        "pipeline_minutes_exhausted"
+    } else "WARNING" if event_type in {"service_suspended", "maintenance_started"} else "INFO"
+
+    platform_details = None
+    details_error = None
+    if RENDER_API_KEY:
+        try:
+            full_event = await asyncio.wait_for(fetch_render_event_details(event_id), timeout=4.5)
+            if isinstance(full_event, dict):
+                platform_details = full_event.get("details", full_event)
+        except Exception as exc:
+            details_error = exception_fields(exc)
+
+    log_kwargs = {
+        "platform_event": event_type,
+        "event_id": event_id,
+        "occurred_at": payload.get("timestamp"),
+        "service_id": service_id,
+        "service_name": event_data.get("serviceName"),
+        "status": event_status,
+    }
+    if platform_details is not None:
+        log_kwargs["platform_details"] = platform_details
+    if details_error is not None:
+        log_kwargs["details_fetch_error"] = details_error
+
+    try:
+        await asyncio.wait_for(
+            technical("render.platform_event", level, **log_kwargs),
+            timeout=7.0,
+        )
+    except asyncio.TimeoutError:
+        write_log_record(make_log_record(
+            "render.telegram_forward_timeout", "WARNING",
+            event_id=event_id, platform_event=event_type,
+        ))
+    return {"ok": True}
+
 
 @app.get("/health")
 async def health():
