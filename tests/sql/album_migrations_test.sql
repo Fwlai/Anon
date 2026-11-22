@@ -75,16 +75,12 @@ BEGIN
   SELECT claimed, state, lease_token
     INTO v_claimed, v_state, v_next_token
   FROM public.anon_claim_update(6002, 30);
-  IF NOT v_claimed OR v_state <> 'claimed' OR v_next_token = v_token THEN
-    RAISE EXCEPTION 'expired update lease was not recovered with a new token';
+  IF v_claimed OR v_state <> 'unknown' OR v_next_token IS NOT NULL THEN
+    RAISE EXCEPTION 'expired update lease was not marked as ambiguous';
   END IF;
 
   IF public.anon_complete_update(6002, v_token) THEN
-    RAISE EXCEPTION 'stale lease token completed a newer claim';
-  END IF;
-
-  IF NOT public.anon_complete_update(6002, v_next_token) THEN
-    RAISE EXCEPTION 'current lease token could not complete the update';
+    RAISE EXCEPTION 'expired lease token completed an unknown update';
   END IF;
 
   INSERT INTO public.anon_album_buffer (
