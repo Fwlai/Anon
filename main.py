@@ -453,32 +453,6 @@ async def technical(event, level="INFO", notify_group=True, **details):
         write_log_record(failure)
     return record
 
-async def register_log_group(message):
-    chat = message.get("chat", {})
-    sender = message.get("from", {})
-    if chat.get("type") not in ("group", "supergroup") or sender.get("id") != ADMIN_ID:
-        return False
-    try:
-        if await log_chat_id():
-            return True
-        me = await tg("getMe", {})
-        member = await tg("getChatMember", {"chat_id": chat["id"], "user_id": me["id"]})
-        if member.get("status") not in ("administrator", "creator"):
-            await tg("sendMessage", {"chat_id": chat["id"], "text": "I need administrator status before registration."})
-            return True
-        await db_post("anon_log_config", {"config_key": "log_chat", "chat_id": chat["id"], "registered_by": ADMIN_ID, "registered_at": datetime.now(timezone.utc).isoformat()}, "resolution=ignore-duplicates,return=minimal")
-        await tg("sendMessage", {"chat_id": chat["id"], "text": "Log group registered."})
-        await technical("system.log_group_registered", group_type=chat.get("type"))
-    except Exception as exc:
-        await technical("system.log_group_registration_failed", "ERROR",
-                        group_type=chat.get("type"), **exception_fields(exc))
-        try:
-            await tg("sendMessage", {"chat_id": chat["id"], "text": "Registration failed. Check permissions and database connection."})
-        except Exception as exc:
-            await technical("telegram.log_group_registration_notice_failed", "WARNING",
-                            notify_group=False, **exception_fields(exc))
-    return True
-
 async def edit_incoming_copy(m):
     uid=m["from"]["id"]
     rows=await db_get("anon_message_map",{"sender_user_id":f"eq.{uid}","user_message_id":f"eq.{m['message_id']}","select":"*"})
@@ -933,7 +907,7 @@ async def webhook(request: Request):
         new_status = (membership.get("new_chat_member") or {}).get("status")
         if group.get("type") in ("group", "supergroup") and new_status in ("member", "administrator"):
             registered = await log_chat_id()
-            if registered and int(group.get("id", 0)) != registered:
+            if not registered or int(group.get("id", 0)) != registered:
                 try:
                     await tg("leaveChat", {"chat_id": group["id"]})
                     await technical("telegram.unregistered_group_left", notify_group=False,
@@ -954,7 +928,7 @@ async def webhook(request: Request):
     chat = message.get("chat", {})
     if chat.get("type") in ("group", "supergroup"):
         registered = await log_chat_id()
-        if registered and int(chat.get("id", 0)) != registered:
+        if not registered or int(chat.get("id", 0)) != registered:
             try:
                 await tg("leaveChat", {"chat_id": chat["id"]})
                 await technical("telegram.unregistered_group_left", notify_group=False,
@@ -962,9 +936,6 @@ async def webhook(request: Request):
             except Exception as exc:
                 await technical("telegram.unregistered_group_leave_failed", "ERROR",
                                 notify_group=False, **exception_fields(exc))
-            return {"ok": True}
-        if not registered and isinstance(message.get("text"), str) and re.match(r"^/log(?:@\w+)?\s*$", message["text"], re.I):
-            await register_log_group(message)
         return {"ok": True}
 
     if uid == ADMIN_ID:
