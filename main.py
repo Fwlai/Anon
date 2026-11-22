@@ -12,7 +12,7 @@ import binascii
 import hashlib
 import hmac
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -49,6 +49,9 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.access").disabled = True
 REQUEST_ID = ContextVar("request_id", default=None)
 UPDATE_ID = ContextVar("update_id", default=None)
+RETENTION_CLEANUP_INTERVAL = 6 * 60 * 60
+_last_retention_cleanup = 0.0
+_retention_cleanup_lock = asyncio.Lock()
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
@@ -300,6 +303,31 @@ async def db_rpc(function, payload):
         ) from None
 
 
+async def db_delete(table, params):
+    try:
+        r = await client.delete(
+            f"{REST}/{table}",
+            params=params,
+            headers=db_headers("return=minimal"),
+        )
+    except httpx.HTTPError as exc:
+        raise IntegrationError(
+            "supabase", "DELETE", resource=table,
+            transport_error=type(exc).__name__,
+        ) from None
+    if r.status_code >= 400:
+        try:
+            error = r.json()
+        except ValueError:
+            error = {}
+        raise IntegrationError(
+            "supabase", "DELETE", resource=table,
+            http_status=r.status_code,
+            error_code=error.get("code"),
+            error=safe_error_message(error.get("message")),
+        )
+
+
 async def db_patch(table, params, payload):
     try:
         r = await client.patch(f"{REST}/{table}", params=params, json=payload, headers=db_headers())
@@ -428,6 +456,28 @@ def kind_of(m):
 
 async def map_outbound(user_mid,uid,admin_mid):
     await db_post("anon_outbound_map",{"user_message_id":user_mid,"sender_user_id":uid,"admin_message_id":admin_mid},"resolution=ignore-duplicates,return=minimal")
+
+async def persist_after_delivery(operation, event, **details):
+    last_error = None
+    for attempt in range(2):
+        try:
+            await operation()
+            return True
+        except Exception as exc:
+            last_error = exc
+            if attempt == 0:
+                await asyncio.sleep(0.15)
+
+    await technical(
+        event,
+        "ERROR",
+        notify_group=False,
+        delivery_confirmed=True,
+        persistence_attempts=2,
+        **details,
+        **exception_fields(last_error),
+    )
+    return False
 
 async def log_chat_id():
     rows = await db_get("anon_log_config", {"config_key": "eq.log_chat", "select": "chat_id", "limit": "1"})
@@ -643,7 +693,17 @@ async def relay_album_to_admin(m, user, reply_to=None):
         raise
 
     if not isinstance(copied, list) or len(copied) != len(message_ids):
-        await finish_album(source_uid, ADMIN_ID, group_id, status="delivered_unmapped")
+        try:
+            await finish_album(source_uid, ADMIN_ID, group_id, status="delivered_unmapped")
+        except Exception as exc:
+            await technical(
+                "message.album_unmapped_state_persistence_failed",
+                "ERROR",
+                direction="user_to_admin",
+                alias=user["alias"],
+                delivery_result_received=True,
+                **exception_fields(exc),
+            )
         await technical(
             "message.album_copy_incomplete", "ERROR",
             direction="user_to_admin", alias=user["alias"],
@@ -720,7 +780,17 @@ async def relay_album_to_user(m, uid, reply_to=None):
         raise
 
     if not isinstance(copied, list) or len(copied) != len(message_ids):
-        await finish_album(source_uid, uid, group_id, status="delivered_unmapped")
+        try:
+            await finish_album(source_uid, uid, group_id, status="delivered_unmapped")
+        except Exception as exc:
+            await technical(
+                "message.album_unmapped_state_persistence_failed",
+                "ERROR",
+                direction="admin_to_user",
+                recipient_user_id=uid,
+                delivery_result_received=True,
+                **exception_fields(exc),
+            )
         await technical(
             "message.album_copy_incomplete", "ERROR",
             direction="admin_to_user", recipient_user_id=uid,
@@ -771,12 +841,45 @@ async def relay_live(m,user,reply_to=None):
         header=(now-last).total_seconds()>=600
     if header:
         h=await tg("sendMessage",{"chat_id":ADMIN_ID,"text":f'<blockquote>Chat: <code>{html.escape(user["alias"])}</code></blockquote>',"parse_mode":"HTML"})
-        await map_admin_message(h["message_id"],uid)
+        await persist_after_delivery(
+            lambda: map_admin_message(h["message_id"], uid),
+            "message.header_mapping_persistence_failed",
+            direction="user_to_admin",
+            admin_message_id=h["message_id"],
+            sender_user_id=uid,
+        )
+        await persist_after_delivery(
+            lambda: db_post(
+                "anon_admin_sessions",
+                {"sender_user_id": uid, "last_message_at": now.isoformat()},
+                "resolution=merge-duplicates,return=minimal",
+            ),
+            "message.session_persistence_failed",
+            direction="user_to_admin",
+            sender_user_id=uid,
+        )
     p={"chat_id":ADMIN_ID,"from_chat_id":uid,"message_id":m["message_id"]}
     if reply_to: p["reply_parameters"]={"message_id":reply_to}
     cp=await tg("copyMessage",p)
-    await map_admin_message(cp["message_id"],uid,m["message_id"])
-    await db_post("anon_admin_sessions",{"sender_user_id":uid,"last_message_at":now.isoformat()},"resolution=merge-duplicates,return=minimal")
+    await persist_after_delivery(
+        lambda: map_admin_message(cp["message_id"], uid, m["message_id"]),
+        "message.delivery_mapping_persistence_failed",
+        direction="user_to_admin",
+        source_message_id=m["message_id"],
+        destination_message_id=cp["message_id"],
+        sender_user_id=uid,
+    )
+    if not header:
+        await persist_after_delivery(
+            lambda: db_post(
+                "anon_admin_sessions",
+                {"sender_user_id": uid, "last_message_at": now.isoformat()},
+                "resolution=merge-duplicates,return=minimal",
+            ),
+            "message.session_persistence_failed",
+            direction="user_to_admin",
+            sender_user_id=uid,
+        )
     await technical("message.forwarded_to_admin", alias=user["alias"], message_type=kind_of(m),
                     source_message_id=m["message_id"], admin_message_id=cp["message_id"])
 
@@ -849,8 +952,18 @@ async def send_to_user(m,uid,reply_to=None):
     p={"chat_id":uid,"from_chat_id":ADMIN_ID,"message_id":m["message_id"]}
     if reply_to: p["reply_parameters"]={"message_id":reply_to}
     cp=await tg("copyMessage",p)
-    await map_outbound(cp["message_id"],uid,m["message_id"])
-    user = await get_user(uid)
+    await persist_after_delivery(
+        lambda: map_outbound(cp["message_id"], uid, m["message_id"]),
+        "message.outbound_mapping_persistence_failed",
+        direction="admin_to_user",
+        source_message_id=m["message_id"],
+        destination_message_id=cp["message_id"],
+        recipient_user_id=uid,
+    )
+    try:
+        user = await get_user(uid)
+    except Exception:
+        user = None
     await technical("message.admin_to_user_sent", alias=user.get("alias") if user else None,
                     message_type=kind_of(m), admin_message_id=m["message_id"],
                     user_message_id=cp["message_id"])
@@ -996,6 +1109,45 @@ async def unmark_update(update_id):
     if r.status_code >= 400:
         raise IntegrationError("supabase", "DELETE", resource="anon_processed_updates",
                                http_status=r.status_code)
+
+async def cleanup_old_records_if_due():
+    global _last_retention_cleanup
+
+    monotonic_now = time.monotonic()
+    if monotonic_now - _last_retention_cleanup < RETENTION_CLEANUP_INTERVAL:
+        return
+
+    async with _retention_cleanup_lock:
+        monotonic_now = time.monotonic()
+        if monotonic_now - _last_retention_cleanup < RETENTION_CLEANUP_INTERVAL:
+            return
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        try:
+            await db_delete(
+                "anon_processed_updates",
+                {"created_at": f"lt.{cutoff}"},
+            )
+            await db_delete(
+                "anon_album_buffer",
+                {"created_at": f"lt.{cutoff}"},
+            )
+            await technical(
+                "maintenance.retention_cleanup_completed",
+                notify_group=False,
+                retention_days=30,
+            )
+        except Exception as exc:
+            await technical(
+                "maintenance.retention_cleanup_failed",
+                "WARNING",
+                notify_group=False,
+                retention_days=30,
+                **exception_fields(exc),
+            )
+        finally:
+            _last_retention_cleanup = time.monotonic()
+
 
 async def rate_ok(uid):
     try:
@@ -1176,6 +1328,7 @@ async def webhook(request: Request):
         try:
             if not await mark_update(update_id):
                 return {"ok": True, "duplicate": True}
+            await cleanup_old_records_if_due()
         except Exception as exc:
             await technical("telegram.update_deduplication_failed", "ERROR",
                             **exception_fields(exc))
