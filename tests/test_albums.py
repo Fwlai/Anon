@@ -261,5 +261,81 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finish.await_count, 2)
 
 
+
+    async def test_album_header_rate_limit_releases_claim_for_retry(self):
+        message = {
+            "message_id": 307,
+            "from": {"id": 123},
+            "media_group_id": "album-header-rate-limit",
+            "photo": [{}],
+        }
+        buffered = [{
+            "sender_user_id": 123,
+            "direction": "user_to_admin",
+            "message_id": 307,
+            "reply_to_message_id": None,
+        }]
+        failure = main.IntegrationError(
+            "telegram", "sendMessage", error_code=429, http_status=429
+        )
+
+        with (
+            patch.object(main, "claim_album_messages", new=AsyncMock(
+                return_value=(123, "album-header-rate-limit", buffered)
+            )),
+            patch.object(main, "db_get", new=AsyncMock(return_value=[])),
+            patch.object(main, "tg", new=AsyncMock(side_effect=failure)),
+            patch.object(main, "finish_album", new=AsyncMock()) as finish,
+            patch.object(main, "technical", new=AsyncMock()),
+        ):
+            with self.assertRaises(main.IntegrationError):
+                await main.relay_album_to_admin(message, {
+                    "telegram_user_id": 123, "alias": "Blue-01"
+                })
+
+        finish.assert_awaited_once_with(
+            123, main.ADMIN_ID, "album-header-rate-limit", status="pending"
+        )
+
+    async def test_ambiguous_album_header_marks_group_terminal_without_replay(self):
+        message = {
+            "message_id": 308,
+            "from": {"id": 123},
+            "media_group_id": "album-header-unknown",
+            "photo": [{}],
+        }
+        buffered = [{
+            "sender_user_id": 123,
+            "direction": "user_to_admin",
+            "message_id": 308,
+            "reply_to_message_id": None,
+        }]
+        failure = main.IntegrationError(
+            "telegram", "sendMessage", transport_error="ReadTimeout"
+        )
+
+        with (
+            patch.object(main, "claim_album_messages", new=AsyncMock(
+                return_value=(123, "album-header-unknown", buffered)
+            )),
+            patch.object(main, "db_get", new=AsyncMock(return_value=[])),
+            patch.object(main, "tg", new=AsyncMock(side_effect=failure)),
+            patch.object(main, "finish_album", new=AsyncMock()) as finish,
+            patch.object(main, "react_status", new=AsyncMock()) as react_status,
+            patch.object(main, "technical", new=AsyncMock()) as technical,
+        ):
+            await main.relay_album_to_admin(message, {
+                "telegram_user_id": 123, "alias": "Blue-01"
+            })
+
+        finish.assert_awaited_once_with(
+            123, main.ADMIN_ID, "album-header-unknown", status="delivered_unmapped"
+        )
+        react_status.assert_awaited_once_with(123, 308, False)
+        self.assertTrue(any(
+            call.args[0] == "message.album_header_outcome_unknown"
+            for call in technical.await_args_list
+        ))
+
 if __name__ == "__main__":
     unittest.main()
