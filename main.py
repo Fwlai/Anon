@@ -247,7 +247,8 @@ async def db_get(table, params):
                                error="invalid_json_response") from None
 
 
-async def db_post(table, payload, prefer="return=representation", params=None):    try:
+async def db_post(table, payload, prefer="return=representation", params=None):
+    try:
         r = await client.post(f"{REST}/{table}", params=params, json=payload, headers=db_headers(prefer))
     except httpx.HTTPError as exc:
         raise IntegrationError("supabase", "POST", resource=table, transport_error=type(exc).__name__) from None
