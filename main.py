@@ -1153,7 +1153,7 @@ async def route_admin(m):
                     await technical("message.admin_reply_delivery_failed", "ERROR",
                                     admin_message_id=m["message_id"], **exception_fields(exc))
                     await react(ADMIN_ID,m["message_id"],"👎")
-                    if m.get("media_group_id"):
+                    if m.get("media_group_id") or telegram_rate_limited(exc):
                         raise
             else:
                 await react(ADMIN_ID,m["message_id"],"👎")
@@ -1174,7 +1174,7 @@ async def route_admin(m):
                     await technical("message.admin_reply_delivery_failed", "ERROR",
                                     admin_message_id=m["message_id"], **exception_fields(exc))
                     await react(ADMIN_ID,m["message_id"],"👎")
-                    if m.get("media_group_id"):
+                    if m.get("media_group_id") or telegram_rate_limited(exc):
                         raise
             else:
                 await react(ADMIN_ID,m["message_id"],"👎")
