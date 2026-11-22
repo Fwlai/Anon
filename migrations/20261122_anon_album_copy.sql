@@ -17,6 +17,62 @@ CREATE INDEX IF NOT EXISTS anon_album_buffer_pending_idx
   ON public.anon_album_buffer (source_chat_id, destination_chat_id, media_group_id, last_seen_at)
   WHERE status = 'pending';
 
+CREATE TABLE IF NOT EXISTS public.anon_album_routes (
+  source_chat_id bigint NOT NULL,
+  media_group_id text NOT NULL,
+  recipient_user_id bigint NOT NULL
+    REFERENCES public.anon_users(telegram_user_id) ON DELETE CASCADE,
+  reply_to_message_id bigint,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (source_chat_id, media_group_id)
+);
+
+ALTER TABLE public.anon_album_routes ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.anon_album_routes FROM anon, authenticated;
+GRANT ALL ON public.anon_album_routes TO service_role;
+
+CREATE OR REPLACE FUNCTION public.anon_reserve_admin_album_route(
+  p_source_chat_id bigint,
+  p_media_group_id text,
+  p_candidate_user_id bigint,
+  p_reply_to_message_id bigint DEFAULT NULL
+)
+RETURNS TABLE (
+  recipient_user_id bigint,
+  reply_to_message_id bigint
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public
+AS $
+BEGIN
+  INSERT INTO public.anon_album_routes (
+    source_chat_id,
+    media_group_id,
+    recipient_user_id,
+    reply_to_message_id
+  )
+  VALUES (
+    p_source_chat_id,
+    p_media_group_id,
+    p_candidate_user_id,
+    p_reply_to_message_id
+  )
+  ON CONFLICT (source_chat_id, media_group_id) DO NOTHING;
+
+  RETURN QUERY
+  SELECT route.recipient_user_id, route.reply_to_message_id
+  FROM public.anon_album_routes AS route
+  WHERE route.source_chat_id = p_source_chat_id
+    AND route.media_group_id = p_media_group_id;
+END;
+$;
+
+REVOKE ALL ON FUNCTION public.anon_reserve_admin_album_route(bigint, text, bigint, bigint)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.anon_reserve_admin_album_route(bigint, text, bigint, bigint)
+  TO service_role;
+
 ALTER TABLE public.anon_album_buffer ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.anon_album_buffer FROM anon, authenticated;
 GRANT ALL ON public.anon_album_buffer TO service_role;
