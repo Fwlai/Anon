@@ -91,7 +91,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
             "sender_user_id": 123, "direction": "user_to_admin",
             "message_id": 302, "reply_to_message_id": None,
         }]
-        failure = main.IntegrationError("telegram", "copyMessages", http_status=400)
+        failure = main.IntegrationError("telegram", "copyMessages", error_code=429, http_status=200)
 
         with patch.object(main, "claim_album_messages", new=AsyncMock(
             return_value=(123, "album-3", buffered)
@@ -132,6 +132,72 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
         db_post.assert_not_awaited()
         db_patch.assert_not_awaited()
         react_status.assert_awaited_once_with(123, 303, False)
+
+
+    async def test_ambiguous_album_copy_error_is_not_replayed(self):
+        message = {
+            "message_id": 304,
+            "from": {"id": 123},
+            "media_group_id": "album-unknown",
+            "photo": [{}],
+        }
+        buffered = [{
+            "sender_user_id": 123, "direction": "user_to_admin",
+            "message_id": 304, "reply_to_message_id": None,
+        }]
+        failure = main.IntegrationError(
+            "telegram", "copyMessages", transport_error="ReadTimeout"
+        )
+        recent = main.datetime.now(main.timezone.utc).isoformat()
+
+        with patch.object(main, "claim_album_messages", new=AsyncMock(
+            return_value=(123, "album-unknown", buffered)
+        )), patch.object(main, "db_get", new=AsyncMock(return_value=[
+            {"last_message_at": recent}
+        ])), patch.object(main, "tg", new=AsyncMock(side_effect=failure)), \
+             patch.object(main, "finish_album", new=AsyncMock()) as finish, \
+             patch.object(main, "react_status", new=AsyncMock()) as react_status, \
+             patch.object(main, "technical", new=AsyncMock()):
+            await main.relay_album_to_admin(message, {
+                "telegram_user_id": 123, "alias": "Blue-01"
+            })
+
+        finish.assert_awaited_once_with(
+            123, main.ADMIN_ID, "album-unknown", status="delivered_unmapped"
+        )
+        react_status.assert_awaited_once_with(123, 304, False)
+
+    async def test_permanent_album_copy_rejection_is_terminal(self):
+        message = {
+            "message_id": 305,
+            "from": {"id": 123},
+            "media_group_id": "album-rejected",
+            "photo": [{}],
+        }
+        buffered = [{
+            "sender_user_id": 123, "direction": "user_to_admin",
+            "message_id": 305, "reply_to_message_id": None,
+        }]
+        failure = main.IntegrationError(
+            "telegram", "copyMessages", error_code=400, http_status=200
+        )
+        recent = main.datetime.now(main.timezone.utc).isoformat()
+
+        with patch.object(main, "claim_album_messages", new=AsyncMock(
+            return_value=(123, "album-rejected", buffered)
+        )), patch.object(main, "db_get", new=AsyncMock(return_value=[
+            {"last_message_at": recent}
+        ])), patch.object(main, "tg", new=AsyncMock(side_effect=failure)), \
+             patch.object(main, "finish_album", new=AsyncMock()) as finish, \
+             patch.object(main, "react_status", new=AsyncMock()), \
+             patch.object(main, "technical", new=AsyncMock()):
+            await main.relay_album_to_admin(message, {
+                "telegram_user_id": 123, "alias": "Blue-01"
+            })
+
+        finish.assert_awaited_once_with(
+            123, main.ADMIN_ID, "album-rejected", status="failed"
+        )
 
 
 if __name__ == "__main__":
