@@ -109,5 +109,42 @@ class AmbiguousSingleDeliveryTests(unittest.IsolatedAsyncioTestCase):
         technical.assert_awaited_once()
 
 
+
+    async def test_ambiguous_header_send_is_not_replayed(self):
+        failure = main.IntegrationError(
+            "telegram", "sendMessage", transport_error="ReadTimeout"
+        )
+        with (
+            patch.object(main, "db_get", new=AsyncMock(return_value=[])),
+            patch.object(main, "tg", new=AsyncMock(side_effect=failure)) as tg,
+            patch.object(main, "react_status", new=AsyncMock()) as react_status,
+            patch.object(main, "technical", new=AsyncMock()) as technical,
+        ):
+            await main.relay_live({
+                "message_id": 107,
+                "from": {"id": 123},
+                "text": "header outcome may be unknown",
+            }, {"alias": "Blue-01"})
+
+        tg.assert_awaited_once()
+        self.assertEqual(tg.await_args.args[0], "sendMessage")
+        react_status.assert_awaited_once_with(123, 107, False)
+        self.assertEqual(technical.await_args.args[0], "message.header_delivery_outcome_unknown")
+
+    async def test_header_rate_limit_is_retryable(self):
+        failure = main.IntegrationError(
+            "telegram", "sendMessage", error_code=429, http_status=429
+        )
+        with (
+            patch.object(main, "db_get", new=AsyncMock(return_value=[])),
+            patch.object(main, "tg", new=AsyncMock(side_effect=failure)),
+        ):
+            with self.assertRaises(main.IntegrationError):
+                await main.relay_live({
+                    "message_id": 108,
+                    "from": {"id": 123},
+                    "text": "retry header",
+                }, {"alias": "Blue-01"})
+
 if __name__ == "__main__":
     unittest.main()
