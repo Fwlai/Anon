@@ -111,6 +111,15 @@ DECLARE
   v_expected integer;
   v_updated integer;
 BEGIN
+  PERFORM pg_advisory_xact_lock(
+    hashtextextended(
+      p_source_chat_id::text || ':' ||
+      p_destination_chat_id::text || ':' ||
+      p_media_group_id,
+      0
+    )
+  );
+
   IF p_status NOT IN ('pending', 'delivered', 'delivered_unmapped') THEN
     RAISE EXCEPTION 'Invalid album status';
   END IF;
@@ -138,8 +147,11 @@ BEGIN
     AND status = 'processing';
 
   IF p_status = 'delivered' THEN
-    IF jsonb_typeof(p_mappings) IS DISTINCT FROM 'array'
-       OR jsonb_array_length(p_mappings) <> v_expected THEN
+    IF jsonb_typeof(p_mappings) IS DISTINCT FROM 'array' THEN
+      RAISE EXCEPTION 'Album mappings must be a JSON array';
+    END IF;
+
+    IF jsonb_array_length(p_mappings) <> v_expected THEN
       RAISE EXCEPTION 'Album mapping count does not match claimed messages';
     END IF;
 
