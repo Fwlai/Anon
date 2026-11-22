@@ -4,7 +4,9 @@ Anonymous Telegram relay with an admin-only inbox and chat switching.
 
 ## Features
 - Permanent unique color aliases (40 colors × 100 numbers)
-- Admin inbox: `/i` shows recent chats and unread counts, with pagination via `/i 2`
+- Admin chat controls: `/i Alias` opens a conversation; `/c` closes it
+- Technical logs are sent only to a registered group, each in a `Log` code block
+- Register the log group with `/setlog` after adding the bot as an administrator
 - Open a conversation with `/i Alias`; close the selected chat with `/c`
 - New-message notifications hide text previews behind Telegram spoilers and use media labels (image, album, video, voice, GIF, file, etc.)
 - Incoming messages are copied into the admin chat only when the conversation is open; otherwise they remain unread until opened
@@ -17,9 +19,8 @@ Anonymous Telegram relay with an admin-only inbox and chat switching.
 - HTTP request logging suppressed to avoid exposing bot-token URLs
 
 ## Commands (admin only)
-- `/i` — inbox
-- `/i 2` — next inbox page
 - `/i Alias` — open/switch chat and deliver unread messages
+- `/setlog` — register the current group as the technical log destination (run as the configured admin; bot must be a group admin)
 - `/c` — close current chat
 - `/block Alias` and `/unblock Alias` — moderation
 
@@ -29,6 +30,14 @@ Anonymous Telegram relay with an admin-only inbox and chat switching.
 - `TELEGRAM_WEBHOOK_SECRET`
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
+
+## Technical log setup
+1. Create a group and add the bot.
+2. Promote the bot to administrator.
+3. Send `/setlog` in the group from the configured admin account.
+4. The bot stores the group's numeric Telegram chat ID in `anon_log_config`. Invite-link changes do not affect logging.
+
+Logs contain event metadata (such as alias and message type) and error notices only. Private message contents are never included in technical logs.
 
 ## Deploy
 Render web service:
