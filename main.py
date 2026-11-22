@@ -80,7 +80,7 @@ class IntegrationError(RuntimeError):
 
 def safe_error_message(value):
     message = str(value or "")
-    for secret in (BOT_TOKEN, SUPABASE_KEY):
+    for secret in (BOT_TOKEN, SUPABASE_KEY, RENDER_API_KEY, RENDER_WEBHOOK_SECRET):
         if secret:
             message = message.replace(secret, "[REDACTED]")
     if SUPABASE_URL:
@@ -834,7 +834,7 @@ async def render_webhook(request: Request):
                         event_id=event_id, event_type=event_type, service_id=service_id)
         return {"ok": True, "ignored": True}
 
-    event_status = payload.get("status")
+    event_status = event_data.get("status")
     level = "ERROR" if event_status == "failed" or event_type in {
         "server_failed", "server_hardware_failure", "image_pull_failed",
         "pipeline_minutes_exhausted"
