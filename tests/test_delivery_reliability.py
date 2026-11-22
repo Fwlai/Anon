@@ -57,7 +57,7 @@ class RetentionCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(setattr, main, "_last_retention_cleanup", original)
         main._last_retention_cleanup = 0.0
 
-        with patch.object(main.time, "monotonic", return_value=10000.0), \
+        with patch.object(main.time, "monotonic", return_value=100000.0), \
              patch.object(main, "db_delete", new=AsyncMock()) as db_delete, \
              patch.object(main, "technical", new=AsyncMock()):
             await main.cleanup_old_records_if_due()
