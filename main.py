@@ -107,6 +107,24 @@ def exception_fields(exc):
     return fields
 
 
+def telegram_error_code(exc):
+    if not isinstance(exc, IntegrationError) or exc.provider != "telegram":
+        return None
+    code = exc.details.get("error_code")
+    if code is None:
+        code = exc.details.get("http_status")
+    return code if isinstance(code, int) else None
+
+
+def telegram_rate_limited(exc):
+    return telegram_error_code(exc) == 429
+
+
+def telegram_permanent_rejection(exc):
+    code = telegram_error_code(exc)
+    return code is not None and 400 <= code < 500 and code != 429
+
+
 def verify_render_webhook(headers, body):
     secret = RENDER_WEBHOOK_SECRET
     if not secret.startswith("whsec_"):
@@ -703,16 +721,43 @@ async def relay_album_to_admin(m, user, reply_to=None):
             "from_chat_id": source_uid,
             "message_ids": message_ids,
         })
-    except Exception:
+    except Exception as exc:
+        if telegram_rate_limited(exc):
+            try:
+                await finish_album(source_uid, ADMIN_ID, group_id, status="pending")
+            except Exception as persist_exc:
+                await technical(
+                    "message.album_retry_state_failed", "ERROR",
+                    direction="user_to_admin", alias=user["alias"],
+                    **exception_fields(persist_exc),
+                )
+            raise
+
+        terminal_status = (
+            "failed" if telegram_permanent_rejection(exc) else "delivered_unmapped"
+        )
         try:
-            await finish_album(source_uid, ADMIN_ID, group_id, status="pending")
+            await finish_album(
+                source_uid, ADMIN_ID, group_id, status=terminal_status
+            )
         except Exception as persist_exc:
             await technical(
-                "message.album_retry_state_failed", "ERROR",
+                "message.album_terminal_state_persistence_failed", "ERROR",
                 direction="user_to_admin", alias=user["alias"],
+                terminal_status=terminal_status,
                 **exception_fields(persist_exc),
             )
-        raise
+        await react_status(uid, m["message_id"], False)
+        await technical(
+            "message.album_delivery_rejected" if terminal_status == "failed"
+            else "message.album_delivery_outcome_unknown",
+            "ERROR",
+            direction="user_to_admin",
+            alias=user["alias"],
+            automatic_retry_suppressed=True,
+            **exception_fields(exc),
+        )
+        return
 
     if not isinstance(copied, list) or len(copied) != len(message_ids):
         try:
@@ -790,16 +835,43 @@ async def relay_album_to_user(m, uid, reply_to=None):
             "from_chat_id": source_uid,
             "message_ids": message_ids,
         })
-    except Exception:
+    except Exception as exc:
+        if telegram_rate_limited(exc):
+            try:
+                await finish_album(source_uid, uid, group_id, status="pending")
+            except Exception as persist_exc:
+                await technical(
+                    "message.album_retry_state_failed", "ERROR",
+                    direction="admin_to_user", recipient_user_id=uid,
+                    **exception_fields(persist_exc),
+                )
+            raise
+
+        terminal_status = (
+            "failed" if telegram_permanent_rejection(exc) else "delivered_unmapped"
+        )
         try:
-            await finish_album(source_uid, uid, group_id, status="pending")
+            await finish_album(
+                source_uid, uid, group_id, status=terminal_status
+            )
         except Exception as persist_exc:
             await technical(
-                "message.album_retry_state_failed", "ERROR",
+                "message.album_terminal_state_persistence_failed", "ERROR",
                 direction="admin_to_user", recipient_user_id=uid,
+                terminal_status=terminal_status,
                 **exception_fields(persist_exc),
             )
-        raise
+        await react(ADMIN_ID, m["message_id"], "👎")
+        await technical(
+            "message.album_delivery_rejected" if terminal_status == "failed"
+            else "message.album_delivery_outcome_unknown",
+            "ERROR",
+            direction="admin_to_user",
+            recipient_user_id=uid,
+            automatic_retry_suppressed=True,
+            **exception_fields(exc),
+        )
+        return
 
     if not isinstance(copied, list) or len(copied) != len(message_ids):
         try:
@@ -882,7 +954,23 @@ async def relay_live(m,user,reply_to=None):
         )
     p={"chat_id":ADMIN_ID,"from_chat_id":uid,"message_id":m["message_id"]}
     if reply_to: p["reply_parameters"]={"message_id":reply_to}
-    cp=await tg("copyMessage",p)
+    try:
+        cp=await tg("copyMessage",p)
+    except Exception as exc:
+        if telegram_rate_limited(exc):
+            raise
+        await react_status(uid, m["message_id"], False)
+        await technical(
+            "message.delivery_rejected" if telegram_permanent_rejection(exc)
+            else "message.delivery_outcome_unknown",
+            "ERROR",
+            direction="user_to_admin",
+            alias=user["alias"],
+            automatic_retry_suppressed=True,
+            **exception_fields(exc),
+        )
+        return
+
     await persist_after_delivery(
         lambda: map_admin_message(cp["message_id"], uid, m["message_id"]),
         "message.delivery_mapping_persistence_failed",
