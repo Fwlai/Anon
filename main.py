@@ -247,8 +247,7 @@ async def db_get(table, params):
                                error="invalid_json_response") from None
 
 
-async def db_post(table, payload, prefer="return=representation", params=None):
-    try:
+async def db_post(table, payload, prefer="return=representation", params=None):    try:
         r = await client.post(f"{REST}/{table}", params=params, json=payload, headers=db_headers(prefer))
     except httpx.HTTPError as exc:
         raise IntegrationError("supabase", "POST", resource=table, transport_error=type(exc).__name__) from None
@@ -497,8 +496,7 @@ async def relay_live(m,user,reply_to=None):
     sessions=await db_get("anon_admin_sessions",{"sender_user_id":f"eq.{uid}","select":"*"})
     header=not sessions
     if sessions:
-        last=datetime.fromisoformat(sessions[0]["last_message_at"].replace("Z","+00:00"))
-        header=(now-last).total_seconds()>=600
+        last=datetime.fromisoformat(sessions[0]["last_message_at"].replace("Z","+00:00"))        header=(now-last).total_seconds()>=600
     if header:
         h=await tg("sendMessage",{"chat_id":ADMIN_ID,"text":f'<blockquote>Chat: <code>{html.escape(user["alias"])}</code></blockquote>',"parse_mode":"HTML"})
         await map_admin_message(h["message_id"],uid)
@@ -536,7 +534,8 @@ async def handle_user(m,user):
         await react_status(uid,m["message_id"],False)
         await db_patch("anon_inbox_items",{"user_id":f"eq.{uid}","user_message_id":f"eq.{m['message_id']}"},{"unread":False})
         return
-    if state.get("active_user_id")==uid or mapped:        try:
+    if state.get("active_user_id")==uid or mapped:
+        try:
             await relay_live(m,user,mapped)
             await db_patch("anon_inbox_items",{"user_id":f"eq.{uid}","user_message_id":f"eq.{m['message_id']}"},{"unread":False})
         except Exception as exc:
@@ -747,8 +746,7 @@ async def rate_ok(uid):
         try:
             error = r.json()
         except ValueError:
-            error = {}
-        raise IntegrationError("supabase", "RPC anon_rate_check", http_status=r.status_code,
+            error = {}        raise IntegrationError("supabase", "RPC anon_rate_check", http_status=r.status_code,
                                error_code=error.get("code"),
                                error=safe_error_message(error.get("message")))
     try:
@@ -997,8 +995,7 @@ async def webhook(request: Request):
             await technical("telegram.start_failed", "ERROR", **exception_fields(exc))
             await react(uid, message["message_id"], "👎")
             if update_id is not None:
-                await unmark_update(update_id)
-            raise HTTPException(status_code=503, detail="start failed")
+                await unmark_update(update_id)            raise HTTPException(status_code=503, detail="start failed")
         return {"ok": True}
 
     user = await get_user(uid)
