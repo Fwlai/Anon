@@ -3,15 +3,41 @@ import random
 import re
 import logging
 import html
+import json
+import time
+import uuid
+from contextvars import ContextVar
 from datetime import datetime, timezone
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+class JSONLogFormatter(logging.Formatter):
+    def format(self, record):
+        if isinstance(record.msg, dict):
+            payload = dict(record.msg)
+        else:
+            payload = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "level": record.levelname,
+                "service": "anon",
+                "environment": "render" if os.getenv("RENDER") == "true" else "local",
+                "event": "application.log",
+                "message": record.getMessage(),
+            }
+        if record.exc_info:
+            payload["exception_type"] = record.exc_info[0].__name__
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()], force=True)
+for handler in logging.getLogger().handlers:
+    handler.setFormatter(JSONLogFormatter())
+
 log = logging.getLogger("anon")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+REQUEST_ID = ContextVar("request_id", default=None)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
@@ -27,34 +53,152 @@ client = httpx.AsyncClient(timeout=25)
 def db_headers(prefer="return=representation"):
     return {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": prefer}
 
+
+class IntegrationError(RuntimeError):
+    def __init__(self, provider, operation, **details):
+        self.provider = provider
+        self.operation = operation
+        self.details = details
+        super().__init__(f"{provider} {operation} failed")
+
+    def log_fields(self):
+        return {"provider": self.provider, "operation": self.operation, **self.details}
+
+
+def safe_error_message(value):
+    message = str(value or "")
+    for secret in (BOT_TOKEN, SUPABASE_KEY):
+        if secret:
+            message = message.replace(secret, "[REDACTED]")
+    if SUPABASE_URL:
+        message = message.replace(SUPABASE_URL, "[SUPABASE_URL]")
+    return message[:300]
+
+
+def exception_fields(exc):
+    if isinstance(exc, IntegrationError):
+        return {"exception_type": type(exc).__name__, **exc.log_fields()}
+    fields = {"exception_type": type(exc).__name__}
+    if isinstance(exc, httpx.HTTPStatusError):
+        fields["http_status"] = exc.response.status_code
+    elif isinstance(exc, httpx.HTTPError):
+        fields["transport_error"] = type(exc).__name__
+    else:
+        message = safe_error_message(exc)
+        if message:
+            fields["message"] = message
+    return fields
+
+
+def render_metadata():
+    keys = {
+        "service_id": "RENDER_SERVICE_ID",
+        "service_name": "RENDER_SERVICE_NAME",
+        "instance_id": "RENDER_INSTANCE_ID",
+        "service_type": "RENDER_SERVICE_TYPE",
+        "git_commit": "RENDER_GIT_COMMIT",
+        "git_branch": "RENDER_GIT_BRANCH",
+        "external_url": "RENDER_EXTERNAL_URL",
+        "cpu_count": "RENDER_CPU_COUNT",
+    }
+    return {name: os.getenv(env) for name, env in keys.items() if os.getenv(env)}
+
+
+def make_log_record(event, level="INFO", **details):
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "level": level.upper(),
+        "service": "anon",
+        "environment": "render" if os.getenv("RENDER") == "true" else "local",
+        "event": event,
+    }
+    request_id = REQUEST_ID.get()
+    if request_id:
+        record["request_id"] = request_id
+    metadata = render_metadata()
+    if metadata:
+        record["render"] = metadata
+    if details:
+        record["details"] = details
+    return record
+
+
+def write_log_record(record):
+    level = getattr(logging, str(record.get("level", "INFO")).upper(), logging.INFO)
+    log.log(level, record)
+
+
 async def db_get(table, params):
-    r = await client.get(f"{REST}/{table}", params=params, headers=db_headers())
-    r.raise_for_status()
-    return r.json()
+    try:
+        r = await client.get(f"{REST}/{table}", params=params, headers=db_headers())
+    except httpx.HTTPError as exc:
+        raise IntegrationError("supabase", "GET", resource=table, transport_error=type(exc).__name__) from None
+    if r.status_code >= 400:
+        try:
+            error = r.json()
+        except ValueError:
+            error = {}
+        raise IntegrationError("supabase", "GET", resource=table, http_status=r.status_code,
+                               error_code=error.get("code"), error=safe_error_message(error.get("message")))
+    try:
+        return r.json()
+    except ValueError:
+        raise IntegrationError("supabase", "GET", resource=table, http_status=r.status_code,
+                               error="invalid_json_response") from None
+
 
 async def db_post(table, payload, prefer="return=representation", params=None):
-    r = await client.post(f"{REST}/{table}", params=params, json=payload, headers=db_headers(prefer))
-    r.raise_for_status()
-    return r.json() if r.content else []
+    try:
+        r = await client.post(f"{REST}/{table}", params=params, json=payload, headers=db_headers(prefer))
+    except httpx.HTTPError as exc:
+        raise IntegrationError("supabase", "POST", resource=table, transport_error=type(exc).__name__) from None
+    if r.status_code >= 400:
+        try:
+            error = r.json()
+        except ValueError:
+            error = {}
+        raise IntegrationError("supabase", "POST", resource=table, http_status=r.status_code,
+                               error_code=error.get("code"), error=safe_error_message(error.get("message")))
+    try:
+        return r.json() if r.content else []
+    except ValueError:
+        raise IntegrationError("supabase", "POST", resource=table, http_status=r.status_code,
+                               error="invalid_json_response") from None
+
 
 async def db_patch(table, params, payload):
-    r = await client.patch(f"{REST}/{table}", params=params, json=payload, headers=db_headers())
-    r.raise_for_status()
-    return r.json() if r.content else []
+    try:
+        r = await client.patch(f"{REST}/{table}", params=params, json=payload, headers=db_headers())
+    except httpx.HTTPError as exc:
+        raise IntegrationError("supabase", "PATCH", resource=table, transport_error=type(exc).__name__) from None
+    if r.status_code >= 400:
+        try:
+            error = r.json()
+        except ValueError:
+            error = {}
+        raise IntegrationError("supabase", "PATCH", resource=table, http_status=r.status_code,
+                               error_code=error.get("code"), error=safe_error_message(error.get("message")))
+    try:
+        return r.json() if r.content else []
+    except ValueError:
+        raise IntegrationError("supabase", "PATCH", resource=table, http_status=r.status_code,
+                               error="invalid_json_response") from None
+
 
 async def tg(method, payload):
     try:
         r = await client.post(f"{API}/{method}", json=payload)
     except httpx.HTTPError as exc:
-        raise RuntimeError(f"Telegram API {method} transport failed ({type(exc).__name__})") from None
-    if r.status_code >= 400:
-        raise RuntimeError(f"Telegram API {method} returned HTTP {r.status_code}")
+        raise IntegrationError("telegram", method, transport_error=type(exc).__name__) from None
     try:
         data = r.json()
     except ValueError:
-        raise RuntimeError(f"Telegram API {method} returned an invalid response") from None
-    if not data.get("ok"):
-        raise RuntimeError(f"Telegram API {method} returned an error")
+        raise IntegrationError("telegram", method, http_status=r.status_code,
+                               error="invalid_json_response") from None
+    if r.status_code >= 400 or not data.get("ok"):
+        raise IntegrationError("telegram", method, http_status=r.status_code,
+                               error_code=data.get("error_code"),
+                               error=safe_error_message(data.get("description")))
     return data.get("result")
 
 async def get_user(uid):
@@ -174,17 +318,38 @@ async def log_chat_id():
     rows = await db_get("anon_log_config", {"config_key": "eq.log_chat", "select": "chat_id", "limit": "1"})
     return int(rows[0]["chat_id"]) if rows else None
 
-async def technical(text, reply_markup=None):
+def utf16_length(value):
+    return len(value.encode("utf-16-le")) // 2
+
+
+async def technical(event, level="INFO", notify_group=True, **details):
+    record = make_log_record(event, level, **details)
+    write_log_record(record)
+    if not notify_group:
+        return record
     try:
         chat_id = await log_chat_id()
         if not chat_id:
-            log.info("TECH_LOG (group not registered): %s", text)
-            return
-        fence = chr(96) * 3
-        log_text = html.unescape(re.sub(r"<[^>]+>", "", str(text)))
-        await tg("sendMessage", {"chat_id": chat_id, "text": fence + "Log\n" + log_text + "\n" + fence, "parse_mode": "Markdown"})
+            return record
+        text = json.dumps(record, ensure_ascii=False, indent=2)
+        if utf16_length(text) > 3900:
+            record["details"] = {"truncated": True, "available_fields": list(details.keys())}
+            text = json.dumps(record, ensure_ascii=False, indent=2)
+        await tg("sendMessage", {
+            "chat_id": chat_id,
+            "text": text,
+            "entities": [{"type": "pre", "offset": 0, "length": utf16_length(text), "language": "json"}],
+            "disable_web_page_preview": True,
+        })
     except Exception as exc:
-        log.warning("Technical log delivery failed (%s)", type(exc).__name__)
+        failure = make_log_record(
+            "logging.telegram_delivery_failed",
+            "ERROR",
+            source_event=event,
+            **exception_fields(exc),
+        )
+        write_log_record(failure)
+    return record
 
 async def register_log_group(message):
     chat = message.get("chat", {})
