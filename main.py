@@ -173,11 +173,16 @@ def sanitize_render_details(value, depth=0):
     if isinstance(value, dict):
         hidden = {"email", "user", "token", "authorization", "secret",
                   "api_key", "password", "access_key"}
-        return {
-            str(key): sanitize_render_details(item, depth + 1)
-            for key, item in value.items()
-            if str(key).lower() not in hidden
-        }
+        cleaned = {}
+        for key, item in value.items():
+            key_name = str(key)
+            if key_name.lower() in hidden:
+                continue
+            sanitized = sanitize_render_details(item, depth + 1)
+            if isinstance(item, (dict, list)) and item and not sanitized:
+                continue
+            cleaned[key_name] = sanitized
+        return cleaned
     if isinstance(value, list):
         return [sanitize_render_details(item, depth + 1) for item in value[:20]]
     if isinstance(value, str):
