@@ -234,8 +234,8 @@ async def allocate_alias(uid):
                 rows = await db_post("anon_users", {"telegram_user_id": uid, "alias": alias})
                 if rows:
                     return rows[0], True
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code != 409:
+            except IntegrationError as exc:
+                if exc.details.get("http_status") != 409:
                     raise
                 current = await get_user(uid)
                 if current:
@@ -470,6 +470,8 @@ async def edit_admin_outbound_copy(m):
             await tg("editMessageText",{"chat_id":uid,"message_id":user_mid,"text":m.get("text","")})
         else:
             await tg("editMessageCaption",{"chat_id":uid,"message_id":user_mid,"caption":m.get("caption","")})
+        await technical("message.admin_edit_relay_succeeded", recipient_message_id=user_mid,
+                        admin_message_id=m["message_id"])
         return True
     except Exception as exc:
         await react(ADMIN_ID,m["message_id"],"👎")
@@ -481,7 +483,12 @@ async def send_to_user(m,uid,reply_to=None):
     p={"chat_id":uid,"from_chat_id":ADMIN_ID,"message_id":m["message_id"]}
     if reply_to: p["reply_parameters"]={"message_id":reply_to}
     cp=await tg("copyMessage",p)
-    await map_outbound(cp["message_id"],uid,m["message_id"]); await activity(uid)
+    await map_outbound(cp["message_id"],uid,m["message_id"])
+    await activity(uid)
+    user = await get_user(uid)
+    await technical("message.admin_to_user_sent", alias=user.get("alias") if user else None,
+                    message_type=kind_of(m), admin_message_id=m["message_id"],
+                    user_message_id=cp["message_id"])
 
 async def open_alias(alias,cmdid):
     u=await get_alias(alias)
@@ -613,13 +620,36 @@ async def mark_update(update_id):
     return bool(rows)
 
 async def unmark_update(update_id):
-    r = await client.delete(f"{REST}/anon_processed_updates", params={"update_id": f"eq.{update_id}"}, headers=db_headers("return=minimal"))
-    r.raise_for_status()
+    try:
+        r = await client.delete(f"{REST}/anon_processed_updates", params={"update_id": f"eq.{update_id}"}, headers=db_headers("return=minimal"))
+    except httpx.HTTPError as exc:
+        raise IntegrationError("supabase", "DELETE", resource="anon_processed_updates",
+                               transport_error=type(exc).__name__) from None
+    if r.status_code >= 400:
+        raise IntegrationError("supabase", "DELETE", resource="anon_processed_updates",
+                               http_status=r.status_code)
 
 async def rate_ok(uid):
-    r = await client.post(f"{REST}/rpc/anon_rate_check", json={"p_user_id": uid, "p_limit": 50, "p_window_seconds": 10}, headers=db_headers("return=representation"))
-    r.raise_for_status()
-    return r.json() is True
+    try:
+        r = await client.post(f"{REST}/rpc/anon_rate_check",
+                              json={"p_user_id": uid, "p_limit": 50, "p_window_seconds": 10},
+                              headers=db_headers("return=representation"))
+    except httpx.HTTPError as exc:
+        raise IntegrationError("supabase", "RPC anon_rate_check",
+                               transport_error=type(exc).__name__) from None
+    if r.status_code >= 400:
+        try:
+            error = r.json()
+        except ValueError:
+            error = {}
+        raise IntegrationError("supabase", "RPC anon_rate_check", http_status=r.status_code,
+                               error_code=error.get("code"),
+                               error=safe_error_message(error.get("message")))
+    try:
+        return r.json() is True
+    except ValueError:
+        raise IntegrationError("supabase", "RPC anon_rate_check",
+                               http_status=r.status_code, error="invalid_json_response") from None
 
 async def map_admin_message(msg_id, sender_id, user_message_id=None):
     payload = {"admin_message_id": msg_id, "sender_user_id": sender_id}
@@ -628,6 +658,47 @@ async def map_admin_message(msg_id, sender_id, user_message_id=None):
     await db_post("anon_message_map", payload, "resolution=ignore-duplicates,return=minimal")
 
 app = FastAPI()
+
+
+@app.middleware("http")
+async def request_observability(request: Request, call_next):
+    incoming_id = request.headers.get("Rndr-Id")
+    request_id = incoming_id or uuid.uuid4().hex
+    request_token = REQUEST_ID.set(request_id)
+    update_token = UPDATE_ID.set(None)
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        status = response.status_code
+        level = "ERROR" if status >= 500 else "WARNING" if status >= 400 else "INFO"
+        await technical(
+            "http.request_completed",
+            level,
+            notify_group=(status >= 500 or duration_ms >= 1500),
+            method=request.method,
+            path=request.url.path,
+            status_code=status,
+            duration_ms=duration_ms,
+            render_request_id=incoming_id,
+        )
+        response.headers["Rndr-Id"] = request_id
+        return response
+    except Exception as exc:
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        await technical(
+            "http.request_exception",
+            "ERROR",
+            method=request.method,
+            path=request.url.path,
+            duration_ms=duration_ms,
+            **exception_fields(exc),
+        )
+        raise
+    finally:
+        UPDATE_ID.reset(update_token)
+        REQUEST_ID.reset(request_token)
+
 
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root():
@@ -640,7 +711,8 @@ async def health():
     try:
         await db_get("anon_users", {"select": "telegram_user_id", "limit": "1"})
         return {"status": "ok"}
-    except Exception:
+    except Exception as exc:
+        await technical("system.health_check_failed", "ERROR", **exception_fields(exc))
         raise HTTPException(status_code=503, detail="database unavailable")
 
 @app.post("/telegram/webhook")
@@ -649,12 +721,18 @@ async def webhook(request: Request):
         raise HTTPException(status_code=403, detail="forbidden")
     update = await request.json()
     update_id = update.get("update_id")
+    UPDATE_ID.set(update_id)
+    update_type = next((key for key in ("message", "edited_message", "my_chat_member")
+                        if key in update), "unknown")
+    await technical("telegram.update_received", notify_group=False,
+                    update_type=update_type, update_id=update_id)
     if update_id is not None:
         try:
             if not await mark_update(update_id):
                 return {"ok": True, "duplicate": True}
-        except Exception:
-            log.exception("Update deduplication failed")
+        except Exception as exc:
+            await technical("telegram.update_deduplication_failed", "ERROR",
+                            **exception_fields(exc))
             raise HTTPException(status_code=503, detail="temporary failure")
     membership = update.get("my_chat_member")
     if membership:
@@ -665,8 +743,11 @@ async def webhook(request: Request):
             if registered and int(group.get("id", 0)) != registered:
                 try:
                     await tg("leaveChat", {"chat_id": group["id"]})
-                except Exception:
-                    log.info("Could not silently leave unregistered group")
+                    await technical("telegram.unregistered_group_left", notify_group=False,
+                                    group_type=group.get("type"), trigger="membership_update")
+                except Exception as exc:
+                    await technical("telegram.unregistered_group_leave_failed", "ERROR",
+                                    notify_group=False, **exception_fields(exc))
         return {"ok": True}
     edited = update.get("edited_message")
     message = update.get("message") or edited
@@ -683,8 +764,11 @@ async def webhook(request: Request):
         if registered and int(chat.get("id", 0)) != registered:
             try:
                 await tg("leaveChat", {"chat_id": chat["id"]})
-            except Exception:
-                log.info("Could not silently leave unregistered group")
+                await technical("telegram.unregistered_group_left", notify_group=False,
+                                group_type=chat.get("type"), trigger="group_message")
+            except Exception as exc:
+                await technical("telegram.unregistered_group_leave_failed", "ERROR",
+                                notify_group=False, **exception_fields(exc))
             return {"ok": True}
         if not registered and isinstance(message.get("text"), str) and re.match(r"^/log(?:@\w+)?\s*$", message["text"], re.I):
             await register_log_group(message)
@@ -694,13 +778,14 @@ async def webhook(request: Request):
         if edited:
             try:
                 await edit_admin_outbound_copy(message)
-            except Exception:
-                log.exception("Admin edit relay failed")
-                await technical("ERROR: Admin edit relay failed")
+            except Exception as exc:
+                await technical("message.admin_edit_relay_failed", "ERROR",
+                                admin_message_id=message.get("message_id"),
+                                **exception_fields(exc))
             return {"ok": True}
         try:
             await route_admin(message)
-        except Exception:
+        except Exception as exc:
             await technical("admin.routing_failed", "ERROR", **exception_fields(exc))
             if update_id is not None: await unmark_update(update_id)
             raise HTTPException(status_code=503, detail="admin routing failed")
@@ -709,7 +794,7 @@ async def webhook(request: Request):
     if edited:
         try:
             await edit_incoming_copy(message)
-        except Exception:
+        except Exception as exc:
             await technical("message.incoming_edit_handler_failed", "ERROR", **exception_fields(exc))
         return {"ok": True}
     text = message.get("text", "")
