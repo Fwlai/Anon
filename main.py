@@ -38,6 +38,7 @@ log = logging.getLogger("anon")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 REQUEST_ID = ContextVar("request_id", default=None)
+UPDATE_ID = ContextVar("update_id", default=None)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
@@ -115,6 +116,9 @@ def make_log_record(event, level="INFO", **details):
     request_id = REQUEST_ID.get()
     if request_id:
         record["request_id"] = request_id
+    update_id = UPDATE_ID.get()
+    if update_id is not None:
+        record["telegram_update_id"] = update_id
     metadata = render_metadata()
     if metadata:
         record["render"] = metadata
@@ -255,15 +259,16 @@ async def remove_admin_keyboard():
             await tg("deleteMessage", {"chat_id": ADMIN_ID, "message_id": message["message_id"]})
         except Exception:
             pass
-    except Exception:
-        log.info("Reply keyboard removal failed")
+    except Exception as exc:
+        await technical("telegram.reply_keyboard_removal_failed", "WARNING", **exception_fields(exc))
 
 async def react(chat_id, message_id, emoji):
     try:
         await tg("setMessageReaction", {"chat_id": chat_id, "message_id": message_id, "reaction": [{"type": "emoji", "emoji": emoji}]})
         return True
-    except Exception:
-        log.info("Reaction request failed")
+    except Exception as exc:
+        await technical("telegram.reaction_failed", "WARNING", notify_group=False,
+                        reaction=emoji, **exception_fields(exc))
         return False
 
 async def react_status(chat_id, message_id, success):
@@ -366,9 +371,10 @@ async def register_log_group(message):
             return True
         await db_post("anon_log_config", {"config_key": "log_chat", "chat_id": chat["id"], "registered_by": ADMIN_ID, "registered_at": datetime.now(timezone.utc).isoformat()}, "resolution=ignore-duplicates,return=minimal")
         await tg("sendMessage", {"chat_id": chat["id"], "text": "Log group registered."})
-        await technical("Log group registered and ready.")
+        await technical("system.log_group_registered", group_type=chat.get("type"))
     except Exception as exc:
-        log.warning("Log group registration failed (%s)", type(exc).__name__)
+        await technical("system.log_group_registration_failed", "ERROR",
+                        group_type=chat.get("type"), **exception_fields(exc))
         try:
             await tg("sendMessage", {"chat_id": chat["id"], "text": "Registration failed. Check permissions and database connection."})
         except Exception:
@@ -387,9 +393,11 @@ async def edit_incoming_copy(m):
             await tg("editMessageText",{"chat_id":ADMIN_ID,"message_id":admin_mid,"text":m.get("text","")})
         else:
             await tg("editMessageCaption",{"chat_id":ADMIN_ID,"message_id":admin_mid,"caption":m.get("caption","")})
-    except Exception:
+    except Exception as exc:
         await react(ADMIN_ID,admin_mid,"👎")
-        await technical("ERROR: Incoming edit relay failed")
+        user = await get_user(uid)
+        await technical("message.edit_relay_failed", "ERROR", direction="user_to_admin",
+                        alias=user.get("alias") if user else None, **exception_fields(exc))
 
 async def relay_live(m,user,reply_to=None):
     uid=m["from"]["id"]; now=datetime.now(timezone.utc)
@@ -407,14 +415,22 @@ async def relay_live(m,user,reply_to=None):
     await map_admin_message(cp["message_id"],uid,m["message_id"])
     await db_post("anon_admin_sessions",{"sender_user_id":uid,"last_message_at":now.isoformat()},"resolution=merge-duplicates,return=minimal")
     await activity(uid)
+    await technical("message.forwarded_to_admin", alias=user["alias"], message_type=kind_of(m),
+                    source_message_id=m["message_id"], admin_message_id=cp["message_id"])
 
 async def handle_user(m,user):
     uid=m["from"]["id"]
     if user.get("blocked_by_admin"):
-        await react_status(uid,m["message_id"],False); return
-    if not await rate_ok(uid): return
+        await technical("message.rejected_blocked_user", "WARNING", alias=user["alias"],
+                        message_type=kind_of(m))
+        await react_status(uid,m["message_id"],False)
+        return
+    if not await rate_ok(uid):
+        await technical("message.rate_limited", "WARNING", alias=user["alias"])
+        return
     kind=kind_of(m); await store_inbox(uid,m,kind); await activity(uid)
-    await technical("Incoming message: " + user["alias"] + " | " + kind)
+    await technical("message.received", alias=user["alias"], message_type=kind,
+                    message_id=m["message_id"])
     mapped=None; reply=m.get("reply_to_message")
     if reply:
         rows=await db_get("anon_outbound_map",{"user_message_id":f"eq.{reply['message_id']}","sender_user_id":f"eq.{uid}","select":"*"})
@@ -431,9 +447,10 @@ async def handle_user(m,user):
         try:
             await relay_live(m,user,mapped)
             await db_patch("anon_inbox_items",{"user_id":f"eq.{uid}","user_message_id":f"eq.{m['message_id']}"},{"unread":False})
-        except Exception:
+        except Exception as exc:
             await react_status(uid,m["message_id"],False)
-            await technical("ERROR: Live relay failed for " + user["alias"])
+            await technical("message.live_relay_failed", "ERROR", alias=user["alias"],
+                            message_type=kind, **exception_fields(exc))
             raise
         return
     group=[]
@@ -454,9 +471,10 @@ async def edit_admin_outbound_copy(m):
         else:
             await tg("editMessageCaption",{"chat_id":uid,"message_id":user_mid,"caption":m.get("caption","")})
         return True
-    except Exception:
+    except Exception as exc:
         await react(ADMIN_ID,m["message_id"],"👎")
-        await technical("ERROR: Admin edit relay failed")
+        await technical("message.admin_edit_relay_failed", "ERROR",
+                        admin_message_id=m["message_id"], **exception_fields(exc))
         return False
 
 async def send_to_user(m,uid,reply_to=None):
@@ -471,7 +489,7 @@ async def open_alias(alias,cmdid):
         await react(ADMIN_ID,cmdid,"👎"); return
     uid=u["telegram_user_id"]; await set_active(uid); await activity(uid)
     await remove_admin_keyboard()
-    await technical(f"Chat: <code>{html.escape(u['alias'])}</code>",{ "remove_keyboard": True})
+    await technical("admin.chat_opened", alias=u["alias"])
     pending=await db_get("anon_inbox_items",{"user_id":f"eq.{uid}","unread":"eq.true","select":"*","order":"created_at.asc","limit":"1000"})
     ok=fail=0
     for item in pending:
@@ -481,9 +499,9 @@ async def open_alias(alias,cmdid):
             await db_patch("anon_inbox_items",{"id":f"eq.{item['id']}"},{"unread":False}); ok+=1
         except Exception:
             fail+=1; await react(uid,item["user_message_id"],"👎")
-    msg=f"Retrieved {ok} unread message(s)."
-    if fail: msg+=f" {fail} message(s) unavailable."
-    if ok or fail: await technical(msg)
+    if ok or fail:
+        await technical("admin.inbox_retrieval_completed", alias=u["alias"],
+                        retrieved=ok, unavailable=fail)
 
 async def inbox(page,cmdid):
     if page<1: await react(ADMIN_ID,cmdid,"👎"); return
@@ -503,7 +521,8 @@ async def inbox(page,cmdid):
             count=counts.get(uid,0); badge=f" · <b>{count} new</b>" if count else ""
             lines.append(f"{n}. <code>{html.escape(u['alias'])}</code>{badge}")
     lines.append("\nOpen: <code>/i Alias</code> · Close: <code>/c</code>")
-    await technical("\n".join(lines),{"remove_keyboard":True})
+    await technical("admin.inbox_overview", unread_total=sum(counts.values()),
+                    chats_total=len(ids), page=page, total_pages=pages)
 
 async def route_admin(m):
     text=m.get("text","")
@@ -543,26 +562,26 @@ async def route_admin(m):
             try: await send_to_user(m,uid)
             except Exception: await react(ADMIN_ID,m["message_id"],"👎")
             return
-    await technical("No chat open. Use /i Alias.")
+    await technical("admin.message_ignored_no_active_chat")
 
 async def admin_command(message):
     text = message.get("text", "")
     match=re.fullmatch(r"/i(?:@\w+)?(?:\s+(.+))?\s*",text,re.I)
     if match:
         arg=(match.group(1) or "").strip()
-        if not arg: await technical("Inbox list disabled. Use /i Alias to open a conversation.")
+        if not arg: await technical("admin.inbox_list_disabled", hint="Use /i Alias to open a conversation")
         elif re.fullmatch(r"[A-Za-z]+-\d{2}",arg): await open_alias(arg,message["message_id"])
         else: await react(ADMIN_ID,message["message_id"],"👎")
         return True
     if re.fullmatch(r"/c(?:@\w+)?\s*",text,re.I):
-        await set_active(None); await technical("Chat closed.")
+        await set_active(None); await technical("admin.chat_closed")
         return True
     match = re.fullmatch(r"/block(?:@\w+)?\s+([A-Za-z]+-\d{2})\s*", text, re.I)
     if match:
         alias = match.group(1).lower()
         rows = await db_get("anon_users", {"alias": f"ilike.{alias}", "select": "*"})
         if not rows:
-            await technical("Alias not found.")
+            await technical("admin.alias_not_found", command="block")
             return True
         target = rows[0]
         await set_block(target["telegram_user_id"], "blocked_by_admin", True)
@@ -570,7 +589,7 @@ async def admin_command(message):
             await send_user(target["telegram_user_id"], "You blocked by Fwlai")
         except Exception:
             log.info("Blocked notice could not be delivered")
-        await technical(f"Blocked: <code>{html.escape(target['alias'])}</code>")
+        await technical("admin.user_blocked", alias=target["alias"])
         return True
     match = re.fullmatch(r"/unblock(?:@\w+)?\s+([A-Za-z]+-\d{2})\s*", text, re.I)
     if match:
@@ -583,9 +602,9 @@ async def admin_command(message):
                 await send_user(target["telegram_user_id"], "You are unblocked by Fwlai")
             except Exception:
                 log.info("Unblock notice could not be delivered")
-            await technical(f"Unblocked: <code>{html.escape(target['alias'])}</code>")
+            await technical("admin.user_unblocked", alias=target["alias"])
         else:
-            await technical("Alias not found.")
+            await technical("admin.alias_not_found", command="unblock")
         return True
     return False
 
@@ -682,8 +701,7 @@ async def webhook(request: Request):
         try:
             await route_admin(message)
         except Exception:
-            log.exception("Admin routing failed")
-            await technical("ERROR: Admin routing failed")
+            await technical("admin.routing_failed", "ERROR", **exception_fields(exc))
             if update_id is not None: await unmark_update(update_id)
             raise HTTPException(status_code=503, detail="admin routing failed")
         return {"ok": True}
@@ -692,7 +710,7 @@ async def webhook(request: Request):
         try:
             await edit_incoming_copy(message)
         except Exception:
-            log.exception("Incoming edit relay failed")
+            await technical("message.incoming_edit_handler_failed", "ERROR", **exception_fields(exc))
         return {"ok": True}
     text = message.get("text", "")
     if text == "/start":
@@ -703,11 +721,14 @@ async def webhook(request: Request):
             else:
                 user, created = await allocate_alias(uid)
             if created:
-                await technical("New user registered: " + user["alias"])
-            if not await react(uid, message["message_id"], "❤️"):
+                await technical("user.registered", alias=user["alias"], registration_source="start")
+            heart_added = await react(uid, message["message_id"], "❤️")
+            if not heart_added:
                 await react(uid, message["message_id"], "👎")
-        except Exception:
-            log.exception("Start flow failed")
+            await technical("telegram.start_processed", alias=user["alias"], user_created=created,
+                            success=True, heart_reaction=heart_added)
+        except Exception as exc:
+            await technical("telegram.start_failed", "ERROR", **exception_fields(exc))
             await react(uid, message["message_id"], "👎")
             if update_id is not None:
                 await unmark_update(update_id)
@@ -718,20 +739,20 @@ async def webhook(request: Request):
     if not user:
         try:
             user, created = await allocate_alias(uid)
-        except Exception:
-            log.exception("Alias allocation failed")
-            await technical("ERROR: Alias allocation failed")
+        except Exception as exc:
+            await technical("user.alias_allocation_failed", "ERROR", **exception_fields(exc))
             if update_id is not None:
                 await unmark_update(update_id)
             raise HTTPException(status_code=503, detail="alias allocation failed")
         if created:
-            await technical("New user registered: " + user["alias"])
+            await technical("user.registered", alias=user["alias"], registration_source="first_message")
     if is_command(text):
         return {"ok": True}
     try:
         await handle_user(message, user)
-    except Exception:
-        log.exception("Message relay failed")
+    except Exception as exc:
+        await technical("message.webhook_handler_failed", "ERROR", alias=user["alias"],
+                        message_type=kind_of(message), **exception_fields(exc))
         if update_id is not None:
             await unmark_update(update_id)
         raise HTTPException(status_code=503, detail="relay failed")
@@ -748,22 +769,27 @@ async def startup():
                 "secret_token": WEBHOOK_SECRET,
                 "allowed_updates": ["message", "edited_message", "my_chat_member"]
             })
-            await technical("Bot started. Webhook is configured.")
-            log.info("Startup check and webhook setup passed")
-        except Exception:
-            log.error("Startup or webhook setup failed; details suppressed to protect bot token")
-            try:
-                await technical("ERROR: Startup or webhook setup failed. Check Render logs.")
-            except Exception:
-                pass
+            await technical("system.startup_completed", database="connected",
+                            telegram_webhook="configured",
+                            allowed_updates=["message", "edited_message", "my_chat_member"])
+        except Exception as exc:
+            await technical("system.startup_failed", "ERROR", **exception_fields(exc))
     else:
-        log.warning("Environment variables are not configured yet")
+        missing = [name for name, value in {
+            "TELEGRAM_BOT_TOKEN": BOT_TOKEN,
+            "TELEGRAM_ADMIN_ID": ADMIN_ID,
+            "TELEGRAM_WEBHOOK_SECRET": WEBHOOK_SECRET,
+            "SUPABASE_URL": SUPABASE_URL,
+            "SUPABASE_SERVICE_ROLE_KEY": SUPABASE_KEY,
+        }.items() if not value]
+        await technical("system.configuration_incomplete", "ERROR", missing_variables=missing)
 
 @app.on_event("shutdown")
 async def shutdown():
     if BOT_TOKEN and ADMIN_ID:
         try:
-            await technical("Bot stopped.")
-        except Exception:
-            pass
+            await technical("system.shutdown_started")
+        except Exception as exc:
+            log.error(make_log_record("system.shutdown_log_failed", "ERROR",
+                                      **exception_fields(exc)))
     await client.aclose()
