@@ -1547,12 +1547,12 @@ async def webhook(request: Request):
         try:
             claim = await mark_update(update_id)
             if not claim.get("claimed"):
-                if claim.get("state") == "processing":
-                    raise HTTPException(
-                        status_code=503,
-                        detail="Telegram update is already being processed",
-                    )
-                return {"ok": True, "duplicate": True}
+                if claim.get("state") == "processed":
+                    return {"ok": True, "duplicate": True}
+                raise HTTPException(
+                    status_code=503,
+                    detail="Telegram update claim is not available yet",
+                )
             lease_token = claim.get("lease_token")
             if not lease_token:
                 raise RuntimeError("Telegram update claim returned no lease token")
