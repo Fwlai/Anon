@@ -4,6 +4,7 @@ import hmac
 import json
 import time
 import unittest
+from unittest.mock import AsyncMock, patch
 
 import main
 
@@ -61,6 +62,16 @@ class StructuredLogTests(unittest.TestCase):
         self.assertEqual(decoded["event"], "test.event")
         self.assertEqual(decoded["level"], "WARNING")
         self.assertEqual(decoded["details"]["count"], 3)
+
+    async def test_technical_sends_only_one_rich_message(self):
+        with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)), \
+             patch.object(main, "tg", new=AsyncMock(return_value={"message_id": 1})) as tg_mock, \
+             patch.object(main, "write_log_record"):
+            await main.technical("test.event", "INFO", sample="value")
+        tg_mock.assert_awaited_once()
+        self.assertEqual(tg_mock.await_args.args[0], "sendRichMessage")
+        self.assertIn("rich_message", tg_mock.await_args.args[1])
+        self.assertNotIn("entities", tg_mock.await_args.args[1])
 
     def test_render_private_fields_are_removed(self):
         result = main.sanitize_render_details({
