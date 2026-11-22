@@ -450,6 +450,29 @@ async def technical(event, level="INFO", notify_group=True, **details):
         write_log_record(failure)
     return record
 
+def edit_request(m, chat_id, message_id):
+    if "text" in m:
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": m.get("text", ""),
+        }
+        for field in ("entities", "link_preview_options"):
+            if field in m:
+                payload[field] = m[field]
+        return "editMessageText", payload
+
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "caption": m.get("caption", ""),
+    }
+    for field in ("caption_entities", "show_caption_above_media"):
+        if field in m:
+            payload[field] = m[field]
+    return "editMessageCaption", payload
+
+
 async def edit_incoming_copy(m):
     uid=m["from"]["id"]
     rows=await db_get("anon_message_map",{"sender_user_id":f"eq.{uid}","user_message_id":f"eq.{m['message_id']}","select":"*"})
@@ -458,10 +481,8 @@ async def edit_incoming_copy(m):
         return
     admin_mid=rows[0]["admin_message_id"]
     try:
-        if "text" in m:
-            await tg("editMessageText",{"chat_id":ADMIN_ID,"message_id":admin_mid,"text":m.get("text","")})
-        else:
-            await tg("editMessageCaption",{"chat_id":ADMIN_ID,"message_id":admin_mid,"caption":m.get("caption","")})
+        method, payload = edit_request(m, ADMIN_ID, admin_mid)
+        await tg(method, payload)
         await technical("message.incoming_edit_relay_succeeded", direction="user_to_admin",
                         admin_message_id=admin_mid, user_message_id=m["message_id"])
     except Exception as exc:
@@ -538,10 +559,8 @@ async def edit_admin_outbound_copy(m):
     uid=mapping["sender_user_id"]
     user_mid=mapping["user_message_id"]
     try:
-        if "text" in m:
-            await tg("editMessageText",{"chat_id":uid,"message_id":user_mid,"text":m.get("text","")})
-        else:
-            await tg("editMessageCaption",{"chat_id":uid,"message_id":user_mid,"caption":m.get("caption","")})
+        method, payload = edit_request(m, uid, user_mid)
+        await tg(method, payload)
         await technical("message.admin_edit_relay_succeeded", recipient_message_id=user_mid,
                         admin_message_id=m["message_id"])
         return True
