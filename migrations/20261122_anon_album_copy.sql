@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS public.anon_album_buffer (
   message_id bigint NOT NULL,
   reply_to_message_id bigint,
   status text NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending', 'processing', 'delivered', 'delivered_unmapped')),
+    CHECK (status IN ('pending', 'processing', 'delivered', 'delivered_unmapped', 'failed')),
   last_seen_at timestamptz NOT NULL DEFAULT now(),
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (source_chat_id, destination_chat_id, media_group_id, message_id)
@@ -120,7 +120,7 @@ BEGIN
     )
   );
 
-  IF p_status NOT IN ('pending', 'delivered', 'delivered_unmapped') THEN
+  IF p_status NOT IN ('pending', 'delivered', 'delivered_unmapped', 'failed') THEN
     RAISE EXCEPTION 'Invalid album status';
   END IF;
 
