@@ -10,38 +10,45 @@ DECLARE
   v_reply bigint;
   v_claimed boolean;
   v_state text;
+  v_token uuid;
+  v_next_token uuid;
 BEGIN
-  SELECT claimed, state INTO v_claimed, v_state
+  SELECT claimed, state, lease_token
+    INTO v_claimed, v_state, v_token
   FROM public.anon_claim_update(6000, 30);
-  IF v_claimed OR v_state <> 'processed' THEN
+  IF v_claimed OR v_state <> 'processed' OR v_token IS NOT NULL THEN
     RAISE EXCEPTION 'legacy processed update was not preserved';
   END IF;
 
-  SELECT claimed, state INTO v_claimed, v_state
+  SELECT claimed, state, lease_token
+    INTO v_claimed, v_state, v_token
   FROM public.anon_claim_update(6001, 30);
-  IF NOT v_claimed OR v_state <> 'claimed' THEN
+  IF NOT v_claimed OR v_state <> 'claimed' OR v_token IS NULL THEN
     RAISE EXCEPTION 'new update lease was not claimed';
   END IF;
 
-  SELECT claimed, state INTO v_claimed, v_state
+  SELECT claimed, state, lease_token
+    INTO v_claimed, v_state, v_next_token
   FROM public.anon_claim_update(6001, 30);
-  IF v_claimed OR v_state <> 'processing' THEN
+  IF v_claimed OR v_state <> 'processing' OR v_next_token <> v_token THEN
     RAISE EXCEPTION 'active update lease did not block duplicate processing';
   END IF;
 
-  IF NOT public.anon_complete_update(6001) THEN
+  IF NOT public.anon_complete_update(6001, v_token) THEN
     RAISE EXCEPTION 'update lease could not be completed';
   END IF;
 
-  SELECT claimed, state INTO v_claimed, v_state
+  SELECT claimed, state, lease_token
+    INTO v_claimed, v_state, v_next_token
   FROM public.anon_claim_update(6001, 30);
-  IF v_claimed OR v_state <> 'processed' THEN
+  IF v_claimed OR v_state <> 'processed' OR v_next_token IS NOT NULL THEN
     RAISE EXCEPTION 'completed update was not deduplicated';
   END IF;
 
-  SELECT claimed, state INTO v_claimed, v_state
+  SELECT claimed, state, lease_token
+    INTO v_claimed, v_state, v_token
   FROM public.anon_claim_update(6002, 30);
-  IF NOT v_claimed THEN
+  IF NOT v_claimed OR v_token IS NULL THEN
     RAISE EXCEPTION 'recoverable update lease was not initially claimed';
   END IF;
 
@@ -49,10 +56,19 @@ BEGIN
   SET lease_until = now() - interval '1 second'
   WHERE update_id = 6002;
 
-  SELECT claimed, state INTO v_claimed, v_state
+  SELECT claimed, state, lease_token
+    INTO v_claimed, v_state, v_next_token
   FROM public.anon_claim_update(6002, 30);
-  IF NOT v_claimed OR v_state <> 'claimed' THEN
-    RAISE EXCEPTION 'expired update lease was not recovered';
+  IF NOT v_claimed OR v_state <> 'claimed' OR v_next_token = v_token THEN
+    RAISE EXCEPTION 'expired update lease was not recovered with a new token';
+  END IF;
+
+  IF public.anon_complete_update(6002, v_token) THEN
+    RAISE EXCEPTION 'stale lease token completed a newer claim';
+  END IF;
+
+  IF NOT public.anon_complete_update(6002, v_next_token) THEN
+    RAISE EXCEPTION 'current lease token could not complete the update';
   END IF;
 
   INSERT INTO public.anon_album_buffer (
