@@ -442,7 +442,7 @@ async def technical(event, level="INFO", notify_group=True, **details):
         rich_markdown = (
             f"# Anon Log\n"
             f"**{level.upper()}**  ` {event_label} `\n\n"
-            f"```json\n{safe_json}\n```
+            f"```json\n{safe_json}\n```"
         )
         try:
             await tg("sendRichMessage", {
