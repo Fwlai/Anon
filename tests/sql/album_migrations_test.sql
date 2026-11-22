@@ -141,6 +141,64 @@ BEGIN
     RAISE EXCEPTION 'failed mapping changed album processing state';
   END IF;
 
+  INSERT INTO public.anon_album_buffer (
+    source_chat_id, destination_chat_id, sender_user_id, direction,
+    media_group_id, message_id, last_seen_at
+  ) VALUES (
+    123, -1004323044570, 123, 'user_to_admin', 'wrong-source-map', 411,
+    now() - interval '3 seconds'
+  );
+
+  SELECT count(*) INTO v_count
+  FROM public.anon_claim_album(123, -1004323044570, 'wrong-source-map', 1);
+  IF v_count <> 1 THEN
+    RAISE EXCEPTION 'wrong source mapping test album was not claimed';
+  END IF;
+
+  BEGIN
+    PERFORM public.anon_finish_album(
+      123, -1004323044570, 'wrong-source-map',
+      '[{"source_message_id":999,"destination_message_id":911}]'::jsonb,
+      'delivered'
+    );
+    RAISE EXCEPTION 'expected unclaimed source ID to fail';
+  EXCEPTION WHEN OTHERS THEN
+    IF SQLERRM = 'expected unclaimed source ID to fail' THEN
+      RAISE;
+    END IF;
+  END;
+
+  INSERT INTO public.anon_album_buffer (
+    source_chat_id, destination_chat_id, sender_user_id, direction,
+    media_group_id, message_id, last_seen_at
+  ) VALUES
+    (123, -1004323044570, 123, 'user_to_admin', 'duplicate-destination-map', 421,
+     now() - interval '3 seconds'),
+    (123, -1004323044570, 123, 'user_to_admin', 'duplicate-destination-map', 422,
+     now() - interval '3 seconds');
+
+  SELECT count(*) INTO v_count
+  FROM public.anon_claim_album(
+    123, -1004323044570, 'duplicate-destination-map', 1
+  );
+  IF v_count <> 2 THEN
+    RAISE EXCEPTION 'duplicate destination mapping test album was not claimed';
+  END IF;
+
+  BEGIN
+    PERFORM public.anon_finish_album(
+      123, -1004323044570, 'duplicate-destination-map',
+      '[{"source_message_id":421,"destination_message_id":912},
+        {"source_message_id":422,"destination_message_id":912}]'::jsonb,
+      'delivered'
+    );
+    RAISE EXCEPTION 'expected duplicate destination IDs to fail';
+  EXCEPTION WHEN OTHERS THEN
+    IF SQLERRM = 'expected duplicate destination IDs to fail' THEN
+      RAISE;
+    END IF;
+  END;
+
   IF NOT EXISTS (
     SELECT 1 FROM pg_indexes
     WHERE schemaname = 'public'
