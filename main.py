@@ -497,7 +497,8 @@ async def relay_live(m,user,reply_to=None):
     sessions=await db_get("anon_admin_sessions",{"sender_user_id":f"eq.{uid}","select":"*"})
     header=not sessions
     if sessions:
-        last=datetime.fromisoformat(sessions[0]["last_message_at"].replace("Z","+00:00"))        header=(now-last).total_seconds()>=600
+        last=datetime.fromisoformat(sessions[0]["last_message_at"].replace("Z","+00:00"))
+        header=(now-last).total_seconds()>=600
     if header:
         h=await tg("sendMessage",{"chat_id":ADMIN_ID,"text":f'<blockquote>Chat: <code>{html.escape(user["alias"])}</code></blockquote>',"parse_mode":"HTML"})
         await map_admin_message(h["message_id"],uid)
