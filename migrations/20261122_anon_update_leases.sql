@@ -11,7 +11,7 @@ DO $$
 BEGIN
   ALTER TABLE public.anon_processed_updates
     ADD CONSTRAINT anon_processed_updates_status_check
-    CHECK (status IN ('processing', 'processed'));
+    CHECK (status IN ('processing', 'processed', 'unknown'));
 EXCEPTION WHEN duplicate_object THEN
   NULL;
 END
@@ -45,7 +45,7 @@ DECLARE
   v_state text;
   v_lease_token uuid := gen_random_uuid();
 BEGIN
-  INSERT INTO public.anon_processed_updates AS update_record (
+  INSERT INTO public.anon_processed_updates (
     update_id,
     status,
     lease_until,
@@ -57,21 +57,29 @@ BEGIN
     now() + make_interval(secs => GREATEST(p_lease_seconds, 30)),
     v_lease_token
   )
-  ON CONFLICT (update_id)
-  DO UPDATE SET
-    status = 'processing',
-    lease_until = EXCLUDED.lease_until,
-    lease_token = EXCLUDED.lease_token,
-    created_at = now()
-  WHERE update_record.status = 'processing'
-    AND (
-      update_record.lease_until IS NULL
-      OR update_record.lease_until <= now()
-    )
-  RETURNING update_record.update_id INTO v_claimed_id;
+  ON CONFLICT (update_id) DO NOTHING
+  RETURNING update_id INTO v_claimed_id;
 
   IF FOUND THEN
     RETURN QUERY SELECT true, 'claimed'::text, v_lease_token;
+    RETURN;
+  END IF;
+
+  UPDATE public.anon_processed_updates
+  SET status = 'unknown',
+      lease_until = NULL,
+      lease_token = NULL,
+      created_at = now()
+  WHERE update_id = p_update_id
+    AND status = 'processing'
+    AND (
+      lease_until IS NULL
+      OR lease_until <= now()
+    )
+  RETURNING update_id INTO v_claimed_id;
+
+  IF FOUND THEN
+    RETURN QUERY SELECT false, 'unknown'::text, NULL::uuid;
     RETURN;
   END IF;
 
