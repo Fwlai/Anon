@@ -708,11 +708,48 @@ async def relay_album_to_admin(m, user, reply_to=None):
         header = (now - last).total_seconds() >= 600
 
     if header:
-        sent_header = await tg("sendMessage", {
-            "chat_id": ADMIN_ID,
-            "text": f'<blockquote>Chat: <code>{html.escape(user["alias"])}</code></blockquote>',
-            "parse_mode": "HTML",
-        })
+        try:
+            sent_header = await tg("sendMessage", {
+                "chat_id": ADMIN_ID,
+                "text": f'<blockquote>Chat: <code>{html.escape(user["alias"])}</code></blockquote>',
+                "parse_mode": "HTML",
+            })
+        except Exception as exc:
+            if telegram_rate_limited(exc):
+                try:
+                    await finish_album(source_uid, ADMIN_ID, group_id, status="pending")
+                except Exception as persist_exc:
+                    await technical(
+                        "message.album_retry_state_failed", "ERROR",
+                        direction="user_to_admin", alias=user["alias"],
+                        stage="header_send", **exception_fields(persist_exc),
+                    )
+                raise
+            terminal_status = (
+                "failed" if telegram_permanent_rejection(exc) else "delivered_unmapped"
+            )
+            try:
+                await finish_album(
+                    source_uid, ADMIN_ID, group_id, status=terminal_status
+                )
+            except Exception as persist_exc:
+                await technical(
+                    "message.album_terminal_state_persistence_failed", "ERROR",
+                    direction="user_to_admin", alias=user["alias"],
+                    terminal_status=terminal_status, stage="header_send",
+                    **exception_fields(persist_exc),
+                )
+            await react_status(uid, m["message_id"], False)
+            await technical(
+                "message.album_header_rejected" if terminal_status == "failed"
+                else "message.album_header_outcome_unknown",
+                "ERROR",
+                direction="user_to_admin",
+                alias=user["alias"],
+                automatic_retry_suppressed=True,
+                **exception_fields(exc),
+            )
+            return
         await persist_after_delivery(
             lambda: map_admin_message(sent_header["message_id"], uid),
             "message.album_header_mapping_persistence_failed",
@@ -971,7 +1008,22 @@ async def relay_live(m,user,reply_to=None):
         last=datetime.fromisoformat(sessions[0]["last_message_at"].replace("Z","+00:00"))
         header=(now-last).total_seconds()>=600
     if header:
-        h=await tg("sendMessage",{"chat_id":ADMIN_ID,"text":f'<blockquote>Chat: <code>{html.escape(user["alias"])}</code></blockquote>',"parse_mode":"HTML"})
+        try:
+            h=await tg("sendMessage",{"chat_id":ADMIN_ID,"text":f'<blockquote>Chat: <code>{html.escape(user["alias"])}</code></blockquote>',"parse_mode":"HTML"})
+        except Exception as exc:
+            if telegram_rate_limited(exc):
+                raise
+            await react_status(uid, m["message_id"], False)
+            await technical(
+                "message.header_delivery_rejected" if telegram_permanent_rejection(exc)
+                else "message.header_delivery_outcome_unknown",
+                "ERROR",
+                direction="user_to_admin",
+                alias=user["alias"],
+                automatic_retry_suppressed=True,
+                **exception_fields(exc),
+            )
+            return
         await persist_after_delivery(
             lambda: map_admin_message(h["message_id"], uid),
             "message.header_mapping_persistence_failed",
