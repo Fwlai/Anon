@@ -1283,8 +1283,28 @@ async def admin_command(message):
     return False
 
 async def mark_update(update_id):
-    rows = await db_post("anon_processed_updates", {"update_id": update_id}, "resolution=ignore-duplicates,return=representation")
-    return bool(rows)
+    rows = await db_rpc("anon_claim_update", {
+        "p_update_id": update_id,
+        "p_lease_seconds": 300,
+    })
+    if isinstance(rows, list) and rows:
+        return rows[0]
+    return {"claimed": False, "state": "missing"}
+
+
+async def complete_update(update_id):
+    completed = await db_rpc("anon_complete_update", {
+        "p_update_id": update_id,
+    })
+    if completed is not True:
+        raise RuntimeError("Telegram update lease could not be completed")
+
+
+async def ack_update(update_id):
+    if update_id is not None:
+        await complete_update(update_id)
+    return {"ok": True}
+
 
 async def unmark_update(update_id):
     try:
@@ -1516,7 +1536,13 @@ async def webhook(request: Request):
                     update_type=update_type)
     if update_id is not None:
         try:
-            if not await mark_update(update_id):
+            claim = await mark_update(update_id)
+            if not claim.get("claimed"):
+                if claim.get("state") == "processing":
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Telegram update is already being processed",
+                    )
                 return {"ok": True, "duplicate": True}
             await cleanup_old_records_if_due()
         except Exception as exc:
@@ -1537,15 +1563,15 @@ async def webhook(request: Request):
                 except Exception as exc:
                     await technical("telegram.unregistered_group_leave_failed", "ERROR",
                                     notify_group=False, **exception_fields(exc))
-        return {"ok": True}
+        return await ack_update(update_id)
     edited = update.get("edited_message")
     message = update.get("message") or edited
     if not message:
-        return {"ok": True}
+        return await ack_update(update_id)
     sender = message.get("from") or {}
     uid = sender.get("id")
     if not uid or sender.get("is_bot"):
-        return {"ok": True}
+        return await ack_update(update_id)
 
     chat = message.get("chat", {})
     if chat.get("type") in ("group", "supergroup"):
@@ -1558,7 +1584,7 @@ async def webhook(request: Request):
             except Exception as exc:
                 await technical("telegram.unregistered_group_leave_failed", "ERROR",
                                 notify_group=False, **exception_fields(exc))
-        return {"ok": True}
+        return await ack_update(update_id)
 
     if uid == ADMIN_ID:
         if edited:
@@ -1568,21 +1594,21 @@ async def webhook(request: Request):
                 await technical("message.admin_edit_relay_failed", "ERROR",
                                 admin_message_id=message.get("message_id"),
                                 **exception_fields(exc))
-            return {"ok": True}
+            return await ack_update(update_id)
         try:
             await route_admin(message)
         except Exception as exc:
             await technical("admin.routing_failed", "ERROR", **exception_fields(exc))
             if update_id is not None: await unmark_update(update_id)
             raise HTTPException(status_code=503, detail="admin routing failed")
-        return {"ok": True}
+        return await ack_update(update_id)
 
     if edited:
         try:
             await edit_incoming_copy(message)
         except Exception as exc:
             await technical("message.incoming_edit_handler_failed", "ERROR", **exception_fields(exc))
-        return {"ok": True}
+        return await ack_update(update_id)
     text = message.get("text", "")
     if text == "/start":
         try:
@@ -1604,7 +1630,7 @@ async def webhook(request: Request):
             if update_id is not None:
                 await unmark_update(update_id)
             raise HTTPException(status_code=503, detail="start failed")
-        return {"ok": True}
+        return await ack_update(update_id)
 
     user = await get_user(uid)
     if not user:
@@ -1625,7 +1651,7 @@ async def webhook(request: Request):
         if update_id is not None:
             await unmark_update(update_id)
         raise HTTPException(status_code=503, detail="relay failed")
-    return {"ok": True}
+    return await ack_update(update_id)
 
 @app.on_event("startup")
 async def startup():
