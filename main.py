@@ -365,10 +365,6 @@ async def react_status(chat_id, message_id, success):
     if message_id is not None:
         await react(chat_id, message_id, "👍" if success else "👎")
 
-def is_command(text):
-    return isinstance(text, str) and text.startswith("/")
-
-
 async def get_alias(alias):
     rows=await db_get("anon_users",{"alias":f"ilike.{alias}","select":"*"})
     return rows[0] if rows else None
@@ -560,7 +556,6 @@ async def send_to_user(m,uid,reply_to=None):
     if reply_to: p["reply_parameters"]={"message_id":reply_to}
     cp=await tg("copyMessage",p)
     await map_outbound(cp["message_id"],uid,m["message_id"])
-    await activity(uid)
     user = await get_user(uid)
     await technical("message.admin_to_user_sent", alias=user.get("alias") if user else None,
                     message_type=kind_of(m), admin_message_id=m["message_id"],
@@ -577,9 +572,7 @@ async def open_alias(alias,cmdid):
 
 async def route_admin(m):
     text=m.get("text","")
-    if text.startswith("/"):
-        if await admin_command(m):
-            return
+    if text.startswith("/") and await admin_command(m):
         return
 
     reply=m.get("reply_to_message")
@@ -981,8 +974,6 @@ async def webhook(request: Request):
             raise HTTPException(status_code=503, detail="alias allocation failed")
         if created:
             await technical("user.registered", alias=user["alias"], registration_source="first_message")
-    if is_command(text):
-        return {"ok": True}
     try:
         await handle_user(message, user)
     except Exception as exc:

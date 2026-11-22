@@ -59,6 +59,23 @@ class IncomingRoutingTests(unittest.IsolatedAsyncioTestCase):
         relay.assert_awaited_once_with(message, user, None)
 
 
+
+    async def test_unknown_slash_message_from_user_is_relayed(self):
+        message = {
+            "message_id": 104,
+            "from": {"id": 123},
+            "text": "/hello",
+        }
+        user = {"telegram_user_id": 123, "alias": "Blue-01"}
+
+        with patch.object(main, "rate_ok", new=AsyncMock(return_value=True)), \
+             patch.object(main, "technical", new=AsyncMock()), \
+             patch.object(main, "relay_live", new=AsyncMock()) as relay:
+            await main.handle_user(message, user)
+
+        relay.assert_awaited_once_with(message, user, None)
+
+
 class AdminRoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_reply_targets_message_author_even_when_another_alias_is_selected(self):
         reply_message = {
@@ -158,6 +175,28 @@ class AdminRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         set_active.assert_awaited_once_with(123)
         db_get.assert_not_awaited()
+
+
+
+    async def test_unknown_slash_message_uses_selected_alias(self):
+        message = {
+            "message_id": 506,
+            "from": {"id": main.ADMIN_ID},
+            "text": "/hello",
+        }
+
+        with patch.object(main, "admin_state", new=AsyncMock(return_value={
+            "active_user_id": 123
+        })), \
+             patch.object(main, "get_user", new=AsyncMock(return_value={
+                 "telegram_user_id": 123,
+                 "alias": "Blue-01",
+                 "blocked_by_admin": False,
+             })), \
+             patch.object(main, "send_to_user", new=AsyncMock()) as send:
+            await main.route_admin(message)
+
+        send.assert_awaited_once_with(message, 123)
 
 
 class ContentCopyTests(unittest.IsolatedAsyncioTestCase):

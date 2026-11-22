@@ -55,7 +55,7 @@ class RenderWebhookVerificationTests(unittest.TestCase):
         self.assertFalse(main.verify_render_webhook(headers, self.body))
 
 
-class StructuredLogTests(unittest.TestCase):
+class StructuredLogTests(unittest.IsolatedAsyncioTestCase):
     def test_log_record_is_json_serializable(self):
         record = main.make_log_record("test.event", "WARNING", count=3)
         decoded = json.loads(json.dumps(record))
