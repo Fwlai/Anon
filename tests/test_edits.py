@@ -148,6 +148,11 @@ class EditWebhookRetryTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch.object(main, "WEBHOOK_SECRET", "test-secret"),
+            patch.object(
+                main, "ADMIN_ID",
+                sender_id if handler_name == "edit_admin_outbound_copy" else 999,
+            ),
+            patch.object(main, "cleanup_old_records_if_due", new=AsyncMock()),
             patch.object(main, "mark_update", new=AsyncMock(return_value={
                 "claimed": True, "state": "claimed", "lease_token": token
             })),
