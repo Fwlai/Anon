@@ -109,5 +109,30 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
         finish.assert_awaited_once_with(123, main.ADMIN_ID, "album-3", status="pending")
 
 
+    async def test_late_album_part_is_rejected_after_group_claimed(self):
+        message = {
+            "message_id": 303,
+            "from": {"id": 123},
+            "media_group_id": "album-late",
+            "photo": [{}],
+        }
+
+        with patch.object(main, "db_get", new=AsyncMock(return_value=[
+            {"status": "processing", "message_id": 301}
+        ])) as db_get, \
+             patch.object(main, "db_post", new=AsyncMock()) as db_post, \
+             patch.object(main, "db_patch", new=AsyncMock()) as db_patch, \
+             patch.object(main, "react_status", new=AsyncMock()) as react_status, \
+             patch.object(main, "technical", new=AsyncMock()):
+            source, group_id, rows = await main.claim_album_messages(
+                message, 123, main.ADMIN_ID, "user_to_admin"
+            )
+
+        self.assertEqual((source, group_id, rows), (123, "album-late", []))
+        db_post.assert_not_awaited()
+        db_patch.assert_not_awaited()
+        react_status.assert_awaited_once_with(123, 303, False)
+
+
 if __name__ == "__main__":
     unittest.main()
