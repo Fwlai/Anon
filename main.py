@@ -257,8 +257,9 @@ async def remove_admin_keyboard():
         message = await tg("sendMessage", {"chat_id": ADMIN_ID, "text": "Keyboard removed.", "reply_markup": {"remove_keyboard": True}})
         try:
             await tg("deleteMessage", {"chat_id": ADMIN_ID, "message_id": message["message_id"]})
-        except Exception:
-            pass
+        except Exception as exc:
+            await technical("telegram.keyboard_notice_cleanup_failed", "WARNING",
+                            notify_group=False, **exception_fields(exc))
     except Exception as exc:
         await technical("telegram.reply_keyboard_removal_failed", "WARNING", **exception_fields(exc))
 
@@ -377,8 +378,9 @@ async def register_log_group(message):
                         group_type=chat.get("type"), **exception_fields(exc))
         try:
             await tg("sendMessage", {"chat_id": chat["id"], "text": "Registration failed. Check permissions and database connection."})
-        except Exception:
-            pass
+        except Exception as exc:
+            await technical("telegram.log_group_registration_notice_failed", "WARNING",
+                            notify_group=False, **exception_fields(exc))
     return True
 
 async def edit_incoming_copy(m):
@@ -393,6 +395,8 @@ async def edit_incoming_copy(m):
             await tg("editMessageText",{"chat_id":ADMIN_ID,"message_id":admin_mid,"text":m.get("text","")})
         else:
             await tg("editMessageCaption",{"chat_id":ADMIN_ID,"message_id":admin_mid,"caption":m.get("caption","")})
+        await technical("message.incoming_edit_relay_succeeded", direction="user_to_admin",
+                        admin_message_id=admin_mid, user_message_id=m["message_id"])
     except Exception as exc:
         await react(ADMIN_ID,admin_mid,"👎")
         user = await get_user(uid)
@@ -549,8 +553,12 @@ async def route_admin(m):
                 await react(ADMIN_ID,m["message_id"],"👎"); return
             u=await get_user(mapping["sender_user_id"])
             if u and not u.get("blocked_by_admin"):
-                try: await send_to_user(m,mapping["sender_user_id"],mapping.get("user_message_id"))
-                except Exception: await react(ADMIN_ID,m["message_id"],"👎")
+                try:
+                    await send_to_user(m,mapping["sender_user_id"],mapping.get("user_message_id"))
+                except Exception as exc:
+                    await technical("message.admin_reply_delivery_failed", "ERROR",
+                                    admin_message_id=m["message_id"], **exception_fields(exc))
+                    await react(ADMIN_ID,m["message_id"],"👎")
             else: await react(ADMIN_ID,m["message_id"],"👎")
             return
         rows=await db_get("anon_outbound_map",{"admin_message_id":f"eq.{reply['message_id']}","select":"*"})
@@ -558,16 +566,24 @@ async def route_admin(m):
             mapping=rows[0]
             if active != mapping["sender_user_id"]:
                 await react(ADMIN_ID,m["message_id"],"👎"); return
-            try: await send_to_user(m,mapping["sender_user_id"],mapping["user_message_id"])
-            except Exception: await react(ADMIN_ID,m["message_id"],"👎")
+            try:
+                await send_to_user(m,mapping["sender_user_id"],mapping["user_message_id"])
+            except Exception as exc:
+                await technical("message.admin_reply_delivery_failed", "ERROR",
+                                admin_message_id=m["message_id"], **exception_fields(exc))
+                await react(ADMIN_ID,m["message_id"],"👎")
             return
         await react(ADMIN_ID,m["message_id"],"👎"); return
     state=await admin_state(); uid=state.get("active_user_id")
     if uid:
         u=await get_user(uid)
         if u and not u.get("blocked_by_admin"):
-            try: await send_to_user(m,uid)
-            except Exception: await react(ADMIN_ID,m["message_id"],"👎")
+            try:
+                await send_to_user(m,uid)
+            except Exception as exc:
+                await technical("message.admin_delivery_failed", "ERROR",
+                                admin_message_id=m["message_id"], **exception_fields(exc))
+                await react(ADMIN_ID,m["message_id"],"👎")
             return
     await technical("admin.message_ignored_no_active_chat")
 
@@ -594,8 +610,9 @@ async def admin_command(message):
         await set_block(target["telegram_user_id"], "blocked_by_admin", True)
         try:
             await send_user(target["telegram_user_id"], "You blocked by Fwlai")
-        except Exception:
-            log.info("Blocked notice could not be delivered")
+        except Exception as exc:
+            await technical("telegram.block_notice_failed", "WARNING",
+                            alias=target["alias"], notify_group=False, **exception_fields(exc))
         await technical("admin.user_blocked", alias=target["alias"])
         return True
     match = re.fullmatch(r"/unblock(?:@\w+)?\s+([A-Za-z]+-\d{2})\s*", text, re.I)
@@ -607,8 +624,9 @@ async def admin_command(message):
             await set_block(target["telegram_user_id"], "blocked_by_admin", False)
             try:
                 await send_user(target["telegram_user_id"], "You are unblocked by Fwlai")
-            except Exception:
-                log.info("Unblock notice could not be delivered")
+            except Exception as exc:
+                await technical("telegram.unblock_notice_failed", "WARNING",
+                                alias=target["alias"], notify_group=False, **exception_fields(exc))
             await technical("admin.user_unblocked", alias=target["alias"])
         else:
             await technical("admin.alias_not_found", command="unblock")
