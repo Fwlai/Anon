@@ -111,9 +111,11 @@ def telegram_error_code(exc):
     if not isinstance(exc, IntegrationError) or exc.provider != "telegram":
         return None
     http_status = exc.details.get("http_status")
+    code = exc.details.get("error_code")
     if isinstance(http_status, int) and http_status >= 500:
         return http_status
-    code = exc.details.get("error_code")
+    if http_status == 429 or code == 429:
+        return 429
     if isinstance(code, int):
         return code
     return http_status if isinstance(http_status, int) else None
