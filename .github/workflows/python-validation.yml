@@ -24,5 +24,8 @@ jobs:
       - name: Compile application
         run: python -m py_compile main.py
 
+      - name: Run logging tests
+        run: python -m unittest discover -s tests -v
+
       - name: Verify application imports
         run: python -c "import main; print('Anon application import OK')"
