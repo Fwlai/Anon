@@ -120,18 +120,18 @@ BEGIN
     )
   );
 
-  IF p_status NOT IN ('pending', 'delivered', 'delivered_unmapped', 'failed') THEN
+  IF p_status IS NULL OR p_status NOT IN ('pending', 'delivered', 'delivered_unmapped', 'failed') THEN
     RAISE EXCEPTION 'Invalid album status';
   END IF;
 
-  SELECT direction, sender_user_id
+  SELECT album.direction, album.sender_user_id
     INTO v_direction, v_sender_user_id
-  FROM public.anon_album_buffer
-  WHERE source_chat_id = p_source_chat_id
-    AND destination_chat_id = p_destination_chat_id
-    AND media_group_id = p_media_group_id
-    AND status = 'processing'
-  ORDER BY message_id
+  FROM public.anon_album_buffer AS album
+  WHERE album.source_chat_id = p_source_chat_id
+    AND album.destination_chat_id = p_destination_chat_id
+    AND album.media_group_id = p_media_group_id
+    AND album.status = 'processing'
+  ORDER BY album.message_id
   LIMIT 1;
 
   IF NOT FOUND THEN
