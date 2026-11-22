@@ -12,6 +12,7 @@ DECLARE
   v_state text;
   v_token uuid;
   v_next_token uuid;
+  v_lease_until timestamptz;
 BEGIN
   IF has_table_privilege('anon', 'public.anon_processed_updates', 'SELECT') THEN
     RAISE EXCEPTION 'anon role can read processed update leases';
@@ -27,6 +28,34 @@ BEGIN
     'service_role', 'public.anon_processed_updates', 'SELECT'
   ) THEN
     RAISE EXCEPTION 'service_role cannot access processed update leases';
+  END IF;
+
+  INSERT INTO public.anon_processed_updates (update_id) VALUES (6003);
+
+  SELECT status, lease_until, lease_token
+    INTO v_state, v_lease_until, v_token
+  FROM public.anon_processed_updates
+  WHERE update_id = 6003;
+  IF v_state <> 'processing' OR v_lease_until <= now() OR v_token IS NOT NULL THEN
+    RAISE EXCEPTION 'legacy application insert was not fenced during deployment';
+  END IF;
+
+  SELECT claimed, state, lease_token
+    INTO v_claimed, v_state, v_token
+  FROM public.anon_claim_update(6003, 30);
+  IF v_claimed OR v_state <> 'processing' OR v_token IS NOT NULL THEN
+    RAISE EXCEPTION 'new application did not wait for legacy update lease';
+  END IF;
+
+  UPDATE public.anon_processed_updates
+  SET lease_until = now() - interval '1 second'
+  WHERE update_id = 6003;
+
+  SELECT claimed, state, lease_token
+    INTO v_claimed, v_state, v_token
+  FROM public.anon_claim_update(6003, 30);
+  IF v_claimed OR v_state <> 'unknown' OR v_token IS NOT NULL THEN
+    RAISE EXCEPTION 'expired legacy update was not marked unknown';
   END IF;
 
   SELECT claimed, state, lease_token
