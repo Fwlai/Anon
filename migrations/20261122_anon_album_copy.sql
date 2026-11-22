@@ -165,6 +165,7 @@ DECLARE
   v_sender_user_id bigint;
   v_expected integer;
   v_updated integer;
+  v_inserted integer;
 BEGIN
   PERFORM pg_advisory_xact_lock(
     hashtextextended(
@@ -210,6 +211,43 @@ BEGIN
       RAISE EXCEPTION 'Album mapping count does not match claimed messages';
     END IF;
 
+    IF (
+      SELECT count(DISTINCT item.source_message_id)
+      FROM jsonb_to_recordset(p_mappings) AS item(
+        source_message_id bigint,
+        destination_message_id bigint
+      )
+    ) <> v_expected THEN
+      RAISE EXCEPTION 'Album source message IDs must be unique and complete';
+    END IF;
+
+    IF EXISTS (
+      SELECT 1
+      FROM jsonb_to_recordset(p_mappings) AS item(
+        source_message_id bigint,
+        destination_message_id bigint
+      )
+      LEFT JOIN public.anon_album_buffer AS album
+        ON album.source_chat_id = p_source_chat_id
+       AND album.destination_chat_id = p_destination_chat_id
+       AND album.media_group_id = p_media_group_id
+       AND album.message_id = item.source_message_id
+       AND album.status = 'processing'
+      WHERE album.message_id IS NULL
+    ) THEN
+      RAISE EXCEPTION 'Album mapping contains an unclaimed source message';
+    END IF;
+
+    IF (
+      SELECT count(DISTINCT item.destination_message_id)
+      FROM jsonb_to_recordset(p_mappings) AS item(
+        source_message_id bigint,
+        destination_message_id bigint
+      )
+    ) <> v_expected THEN
+      RAISE EXCEPTION 'Album destination message IDs must be unique and complete';
+    END IF;
+
     IF v_direction = 'user_to_admin' THEN
       INSERT INTO public.anon_message_map (
         admin_message_id, sender_user_id, user_message_id
@@ -223,6 +261,11 @@ BEGIN
         destination_message_id bigint
       )
       ON CONFLICT (admin_message_id) DO NOTHING;
+
+      GET DIAGNOSTICS v_inserted = ROW_COUNT;
+      IF v_inserted <> v_expected THEN
+        RAISE EXCEPTION 'Not all incoming album mappings were inserted';
+      END IF;
     ELSE
       INSERT INTO public.anon_outbound_map (
         user_message_id, sender_user_id, admin_message_id
@@ -236,6 +279,11 @@ BEGIN
         destination_message_id bigint
       )
       ON CONFLICT (sender_user_id, user_message_id) DO NOTHING;
+
+      GET DIAGNOSTICS v_inserted = ROW_COUNT;
+      IF v_inserted <> v_expected THEN
+        RAISE EXCEPTION 'Not all outgoing album mappings were inserted';
+      END IF;
     END IF;
   END IF;
 
