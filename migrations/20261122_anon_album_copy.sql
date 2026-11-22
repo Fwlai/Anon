@@ -307,3 +307,5 @@ GRANT EXECUTE ON FUNCTION public.anon_claim_album(bigint, bigint, text, integer)
   TO service_role;
 GRANT EXECUTE ON FUNCTION public.anon_finish_album(bigint, bigint, text, jsonb, text)
   TO service_role;
+
+NOTIFY pgrst, 'reload schema';
