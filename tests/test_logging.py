@@ -78,6 +78,64 @@ class StructuredLogTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("` test.event `", markdown)
         self.assertIn("```json", markdown)
 
+    async def test_event_heading_cannot_inject_markdown_or_new_lines(self):
+        with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)), \
+             patch.object(main, "tg", new=AsyncMock(return_value={"message_id": 1})) as tg_mock, \
+             patch.object(main, "write_log_record"):
+            await main.technical("bad`event\n```json", "WARNING")
+
+        markdown = tg_mock.await_args.args[1]["rich_message"]["markdown"]
+        self.assertEqual(markdown.count("```"), 2)
+        self.assertEqual(markdown.splitlines()[0], "` bad_event___json `")
+
+    async def test_json_code_fence_inside_detail_does_not_break_markdown(self):
+        original = {"snippet": "before ```json\nafter"}
+        with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)), \
+             patch.object(main, "tg", new=AsyncMock(return_value={"message_id": 1})) as tg_mock, \
+             patch.object(main, "write_log_record"):
+            await main.technical("test.event", "ERROR", payload=original)
+
+        markdown = tg_mock.await_args.args[1]["rich_message"]["markdown"]
+        self.assertEqual(markdown.count("```"), 2)
+        json_text = markdown.split("```json\n", 1)[1].rsplit("\n```", 1)[0]
+        record = json.loads(json_text)
+        self.assertEqual(record["details"]["payload"], original)
+
+    async def test_oversized_log_is_truncated_before_rich_message_send(self):
+        with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)), \
+             patch.object(main, "tg", new=AsyncMock(return_value={"message_id": 1})) as tg_mock, \
+             patch.object(main, "write_log_record"):
+            await main.technical("test.large", "ERROR", huge_value="x" * 5000)
+
+        markdown = tg_mock.await_args.args[1]["rich_message"]["markdown"]
+        json_text = markdown.split("```json\n", 1)[1].rsplit("\n```", 1)[0]
+        record = json.loads(json_text)
+        self.assertTrue(record["details"]["truncated"])
+        self.assertEqual(record["details"]["available_fields"], ["huge_value"])
+        self.assertLess(main.utf16_length(markdown), 3100)
+
+    async def test_missing_log_group_skips_telegram_delivery(self):
+        with patch.object(main, "log_chat_id", new=AsyncMock(return_value=None)), \
+             patch.object(main, "tg", new=AsyncMock()) as tg_mock, \
+             patch.object(main, "write_log_record"):
+            record = await main.technical("test.no_group")
+
+        self.assertEqual(record["event"], "test.no_group")
+        tg_mock.assert_not_awaited()
+
+    async def test_rich_message_failure_does_not_fallback_to_send_message(self):
+        failure = main.IntegrationError(
+            "telegram", "sendRichMessage", transport_error="ReadTimeout"
+        )
+        with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)), \
+             patch.object(main, "tg", new=AsyncMock(side_effect=failure)) as tg_mock, \
+             patch.object(main, "write_log_record") as write_log:
+            await main.technical("test.delivery_failure")
+
+        tg_mock.assert_awaited_once()
+        self.assertEqual(tg_mock.await_args.args[0], "sendRichMessage")
+        self.assertEqual(write_log.call_count, 2)
+
     def test_render_private_fields_are_removed(self):
         result = main.sanitize_render_details({
             "deploy": {"status": "failed"},
