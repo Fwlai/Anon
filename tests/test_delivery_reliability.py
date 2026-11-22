@@ -8,14 +8,16 @@ import main
 class ConfirmedDeliveryPersistenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_user_message_is_not_copied_again_when_mapping_and_session_writes_fail(self):
         recent = datetime.now(timezone.utc).isoformat()
+        failure = main.IntegrationError("supabase", "POST", http_status=503)
+
         with patch.object(main, "db_get", new=AsyncMock(return_value=[
             {"last_message_at": recent}
         ])), patch.object(main, "tg", new=AsyncMock(return_value={
             "message_id": 901
         })) as tg, patch.object(main, "map_admin_message", new=AsyncMock(
-            side_effect=main.IntegrationError("supabase", "POST", http_status=503)
+            side_effect=failure
         )), patch.object(main, "db_post", new=AsyncMock(
-            side_effect=main.IntegrationError("supabase", "POST", http_status=503)
+            side_effect=failure
         )), patch.object(main, "technical", new=AsyncMock()) as technical:
             await main.relay_live({
                 "message_id": 101,
@@ -83,6 +85,7 @@ class RetentionCleanupTests(unittest.IsolatedAsyncioTestCase):
         db_delete.assert_not_awaited()
 
 
+class AmbiguousSingleDeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_ambiguous_single_message_copy_is_not_replayed(self):
         recent = datetime.now(timezone.utc).isoformat()
         failure = main.IntegrationError(
@@ -104,4 +107,6 @@ class RetentionCleanupTests(unittest.IsolatedAsyncioTestCase):
         react_status.assert_awaited_once_with(123, 106, False)
         technical.assert_awaited_once()
 
+
+if __name__ == "__main__":
     unittest.main()
