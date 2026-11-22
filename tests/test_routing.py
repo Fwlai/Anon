@@ -1,0 +1,215 @@
+import unittest
+from unittest.mock import AsyncMock, patch
+
+import main
+
+
+class IncomingRoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_every_user_message_is_relayed_without_an_active_alias(self):
+        message = {
+            "message_id": 101,
+            "from": {"id": 123},
+            "voice": {"file_id": "voice-file"},
+        }
+        user = {"telegram_user_id": 123, "alias": "Blue-01"}
+
+        with patch.object(main, "rate_ok", new=AsyncMock(return_value=True)), \
+             patch.object(main, "technical", new=AsyncMock()), \
+             patch.object(main, "relay_live", new=AsyncMock()) as relay, \
+             patch.object(main, "db_get", new=AsyncMock()) as db_get:
+            await main.handle_user(message, user)
+
+        relay.assert_awaited_once_with(message, user, None)
+        db_get.assert_not_awaited()
+
+    async def test_reply_context_is_used_when_it_maps_to_an_admin_message(self):
+        message = {
+            "message_id": 102,
+            "from": {"id": 123},
+            "text": "reply",
+            "reply_to_message": {"message_id": 88},
+        }
+        user = {"telegram_user_id": 123, "alias": "Blue-01"}
+
+        with patch.object(main, "rate_ok", new=AsyncMock(return_value=True)), \
+             patch.object(main, "technical", new=AsyncMock()), \
+             patch.object(main, "db_get", new=AsyncMock(return_value=[
+                 {"admin_message_id": 700}
+             ])), \
+             patch.object(main, "relay_live", new=AsyncMock()) as relay:
+            await main.handle_user(message, user)
+
+        relay.assert_awaited_once_with(message, user, 700)
+
+    async def test_unmapped_user_reply_is_still_delivered_as_a_new_message(self):
+        message = {
+            "message_id": 103,
+            "from": {"id": 123},
+            "text": "still deliver this",
+            "reply_to_message": {"message_id": 9999},
+        }
+        user = {"telegram_user_id": 123, "alias": "Blue-01"}
+
+        with patch.object(main, "rate_ok", new=AsyncMock(return_value=True)), \
+             patch.object(main, "technical", new=AsyncMock()), \
+             patch.object(main, "db_get", new=AsyncMock(return_value=[])), \
+             patch.object(main, "relay_live", new=AsyncMock()) as relay:
+            await main.handle_user(message, user)
+
+        relay.assert_awaited_once_with(message, user, None)
+
+
+class AdminRoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reply_targets_message_author_even_when_another_alias_is_selected(self):
+        reply_message = {
+            "message_id": 501,
+            "from": {"id": main.ADMIN_ID},
+            "text": "admin reply",
+            "reply_to_message": {"message_id": 700},
+        }
+        mapping = [{
+            "admin_message_id": 700,
+            "sender_user_id": 123,
+            "user_message_id": 101,
+        }]
+
+        with patch.object(main, "admin_state", new=AsyncMock(return_value={
+            "active_user_id": 999
+        })), \
+             patch.object(main, "db_get", new=AsyncMock(return_value=mapping)), \
+             patch.object(main, "get_user", new=AsyncMock(return_value={
+                 "telegram_user_id": 123,
+                 "alias": "Blue-01",
+                 "blocked_by_admin": False,
+             })), \
+             patch.object(main, "send_to_user", new=AsyncMock()) as send, \
+             patch.object(main, "react", new=AsyncMock()) as react:
+            await main.route_admin(reply_message)
+
+        send.assert_awaited_once_with(reply_message, 123, 101)
+        react.assert_not_awaited()
+
+    async def test_reply_to_admin_copy_targets_user_without_active_alias(self):
+        reply_message = {
+            "message_id": 502,
+            "from": {"id": main.ADMIN_ID},
+            "text": "another reply",
+            "reply_to_message": {"message_id": 701},
+        }
+        outbound_mapping = [{
+            "admin_message_id": 701,
+            "sender_user_id": 123,
+            "user_message_id": 202,
+        }]
+
+        with patch.object(main, "admin_state", new=AsyncMock(return_value={
+            "active_user_id": None
+        })), \
+             patch.object(main, "db_get", new=AsyncMock(side_effect=[
+                 [], outbound_mapping
+             ])), \
+             patch.object(main, "get_user", new=AsyncMock(return_value={
+                 "telegram_user_id": 123,
+                 "alias": "Blue-01",
+                 "blocked_by_admin": False,
+             })), \
+             patch.object(main, "send_to_user", new=AsyncMock()) as send:
+            await main.route_admin(reply_message)
+
+        send.assert_awaited_once_with(reply_message, 123, 202)
+
+    async def test_admin_message_without_reply_or_selected_alias_gets_dislike(self):
+        message = {
+            "message_id": 503,
+            "from": {"id": main.ADMIN_ID},
+            "text": "no recipient",
+        }
+
+        with patch.object(main, "admin_state", new=AsyncMock(return_value={
+            "active_user_id": None
+        })), \
+             patch.object(main, "react", new=AsyncMock()) as react, \
+             patch.object(main, "technical", new=AsyncMock()):
+            await main.route_admin(message)
+
+        react.assert_awaited_once_with(main.ADMIN_ID, 503, "👎")
+
+    async def test_i_without_alias_is_rejected(self):
+        message = {"message_id": 504, "text": "/i"}
+
+        with patch.object(main, "react", new=AsyncMock()) as react:
+            handled = await main.admin_command(message)
+
+        self.assertTrue(handled)
+        react.assert_awaited_once_with(main.ADMIN_ID, 504, "👎")
+
+    async def test_open_alias_only_selects_recipient(self):
+        user = {
+            "telegram_user_id": 123,
+            "alias": "Blue-01",
+            "blocked_by_admin": False,
+        }
+
+        with patch.object(main, "get_alias", new=AsyncMock(return_value=user)), \
+             patch.object(main, "set_active", new=AsyncMock()) as set_active, \
+             patch.object(main, "technical", new=AsyncMock()), \
+             patch.object(main, "db_get", new=AsyncMock()) as db_get:
+            await main.open_alias("Blue-01", 505)
+
+        set_active.assert_awaited_once_with(123)
+        db_get.assert_not_awaited()
+
+
+class ContentCopyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_incoming_voice_uses_copy_message_without_downloading(self):
+        message = {
+            "message_id": 601,
+            "from": {"id": 123},
+            "voice": {"file_id": "voice-file"},
+        }
+        user = {"telegram_user_id": 123, "alias": "Blue-01"}
+
+        with patch.object(main, "db_get", new=AsyncMock(return_value=[])), \
+             patch.object(main, "tg", new=AsyncMock(side_effect=[
+                 {"message_id": 900},
+                 {"message_id": 901},
+             ])) as tg, \
+             patch.object(main, "map_admin_message", new=AsyncMock()), \
+             patch.object(main, "db_post", new=AsyncMock()), \
+             patch.object(main, "technical", new=AsyncMock()):
+            await main.relay_live(message, user)
+
+        self.assertEqual(tg.await_args_list[1].args[0], "copyMessage")
+        self.assertEqual(tg.await_args_list[1].args[1], {
+            "chat_id": main.ADMIN_ID,
+            "from_chat_id": 123,
+            "message_id": 601,
+        })
+
+    async def test_admin_media_uses_copy_message_for_selected_user(self):
+        message = {
+            "message_id": 602,
+            "from": {"id": main.ADMIN_ID},
+            "audio": {"file_id": "audio-file"},
+        }
+
+        with patch.object(main, "tg", new=AsyncMock(return_value={
+            "message_id": 902
+        })) as tg, \
+             patch.object(main, "map_outbound", new=AsyncMock()) as map_outbound, \
+             patch.object(main, "get_user", new=AsyncMock(return_value={
+                 "alias": "Blue-01"
+             })), \
+             patch.object(main, "technical", new=AsyncMock()):
+            await main.send_to_user(message, 123)
+
+        tg.assert_awaited_once_with("copyMessage", {
+            "chat_id": 123,
+            "from_chat_id": main.ADMIN_ID,
+            "message_id": 602,
+        })
+        map_outbound.assert_awaited_once_with(902, 123, 602)
+
+
+if __name__ == "__main__":
+    unittest.main()

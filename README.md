@@ -1,27 +1,33 @@
 # Anon
 
-Anonymous Telegram relay with an admin-only inbox and chat switching.
+One-way anonymous Telegram relay: user messages are delivered to the admin immediately, and only the admin can reply to users.
 
 ## Features
 - Permanent unique color aliases (40 colors × 100 numbers)
-- Admin chat controls: `/i Alias` opens a conversation; `/c` closes it
-- Technical logs are sent only to a registered group, each in a `Log` code block
-- Technical logs are restricted to the pre-registered group; the bot leaves all other groups automatically
-- Open a conversation with `/i Alias`; close the selected chat with `/c`
-- New-message notifications hide text previews behind Telegram spoilers and use media labels (image, album, video, voice, GIF, file, etc.)
-- Incoming messages are copied into the admin chat only when the conversation is open; otherwise they remain unread until opened
-- Reply mapping is preserved for copies of both inbound and outbound messages, allowing replies to target the exact counterpart message
-- Switching chats does not erase unread messages or previous message mappings
-- No positive delivery reactions; only a dislike is used when a message cannot be transferred or a requested alias is invalid
-- User messages are not archived as text in the database; only Telegram message IDs, routing metadata, unread state, aliases, and activity are stored
-- Admin can block/unblock aliases; users do not have block/unblock commands
-- Severe burst throttling, webhook secret validation, and update deduplication
-- HTTP request logging suppressed to avoid exposing bot-token URLs
+- Every incoming user message is relayed to the admin immediately, whether or not a destination is selected with `/i`
+- Reply to any relayed user message to answer that message's author
+- `/i Alias` selects a user so the admin can send messages without using Reply
+- `/c` clears the selected destination
+- Text, photos, videos, documents, audio, voice messages, stickers, animations, locations, contacts, polls, and other Telegram message types are copied through Telegram's Bot API
+- Reply mappings are retained for both incoming messages and admin-to-user copies
+- No inbox, unread state, queued messages, or delayed inbox retrieval
+- Only a dislike reaction is used when an admin message has no destination or a transfer fails
+- Technical logs are sent only to a registered group
+- Technical logs contain metadata only; private message contents are never logged
+- Users can be blocked/unblocked by the admin
+- Webhook secret validation, update deduplication, and burst throttling
 
 ## Commands (admin only)
-- `/i Alias` — open/switch chat and deliver unread messages
-- `/c` — close current chat
+- `/i Alias` — select a recipient for messages sent without Reply
+- `/c` — clear the selected recipient
 - `/block Alias` and `/unblock Alias` — moderation
+
+## Message transfer
+Incoming messages are copied to the admin chat as soon as their update is handled. Replying to a copied incoming message sends the admin's message to that original sender. This works independently of the currently selected `/i Alias`.
+
+When no message is being replied to, the selected `/i Alias` is used as the recipient. If there is no selected alias, the bot reacts with a dislike instead of guessing a recipient.
+
+Transfers use Telegram's `copyMessage` method, so the original message content and supported media are preserved without downloading files to the bot server. Telegram itself excludes certain special/service message types from copying; normal text, photos, videos, files, music/audio, voice messages, stickers, animations, and other standard message types are supported.
 
 ## Required environment variables
 - `TELEGRAM_BOT_TOKEN`
@@ -31,13 +37,11 @@ Anonymous Telegram relay with an admin-only inbox and chat switching.
 - `SUPABASE_SERVICE_ROLE_KEY`
 
 ## Technical log group
-The technical log destination is already registered in `anon_log_config`. The bot is intended to remain only in that group and automatically leaves any other group it is added to. The group ID is preserved in the database.
-
-Logs contain event metadata (such as alias and message type) and error notices only. Private message contents are never included in technical logs.
+The technical log destination is already registered in `anon_log_config`. The bot is intended to remain only in that group and automatically leaves any other group it is added to.
 
 ## Deploy
 Render web service:
 - Build: `pip install -r requirements.txt`
 - Start: `uvicorn main:app --host 0.0.0.0 --port $PORT`
 
-The webhook is registered on startup. The service exposes `/` and `/health`.
+The service exposes `/` and `/health`.
