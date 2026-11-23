@@ -112,7 +112,7 @@ class AmbiguousSingleDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ambiguous_header_send_is_not_replayed(self):
         failure = main.IntegrationError(
-            "telegram", "sendMessage", transport_error="ReadTimeout"
+            "telegram", "sendRichMessage", transport_error="ReadTimeout"
         )
         with (
             patch.object(main, "db_get", new=AsyncMock(return_value=[])),
@@ -127,13 +127,13 @@ class AmbiguousSingleDeliveryTests(unittest.IsolatedAsyncioTestCase):
             }, {"alias": "Blue-01"})
 
         tg.assert_awaited_once()
-        self.assertEqual(tg.await_args.args[0], "sendMessage")
+        self.assertEqual(tg.await_args.args[0], "sendRichMessage")
         react_status.assert_awaited_once_with(123, 107, False)
         self.assertEqual(technical.await_args.args[0], "message.header_delivery_outcome_unknown")
 
     async def test_header_rate_limit_is_retryable(self):
         failure = main.IntegrationError(
-            "telegram", "sendMessage", error_code=429, http_status=429
+            "telegram", "sendRichMessage", error_code=429, http_status=429
         )
         with (
             patch.object(main, "db_get", new=AsyncMock(return_value=[])),
