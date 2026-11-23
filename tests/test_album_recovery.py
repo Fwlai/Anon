@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import main
 
@@ -95,7 +95,7 @@ class DurableAlbumRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_recovery_does_not_start_duplicate_in_process_worker(self):
         key = ("user_to_admin", 123, main.ADMIN_ID, "already-running")
-        task = AsyncMock()
+        task = MagicMock()
         task.done.return_value = False
         rows = [{
             "source_chat_id": 123,

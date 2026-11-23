@@ -62,7 +62,7 @@ class AlbumInsertRaceFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((source, group_id, rows), (123, "album-race", []))
         db_post.assert_awaited_once()
         db_patch.assert_awaited_once()
-        self.assertEqual(db_rpc.await_count, 4)
+        self.assertEqual(db_rpc.await_count, 1)
         self.assertTrue(all(
             item.args[0] == "anon_claim_album"
             for item in db_rpc.await_args_list
