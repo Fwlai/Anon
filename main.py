@@ -52,6 +52,31 @@ UPDATE_ID = ContextVar("update_id", default=None)
 RETENTION_CLEANUP_INTERVAL = 6 * 60 * 60
 _last_retention_cleanup = 0.0
 _retention_cleanup_lock = asyncio.Lock()
+_STARTED_AT = time.time()
+
+# Albums: Telegram delivers album parts one by one and waits for each reply,
+# so parts are buffered quickly and the album is delivered in the background
+# once no new part has arrived for ALBUM_QUIET_SECONDS.
+ALBUM_QUIET_SECONDS = 3
+ALBUM_MAX_WAIT_SECONDS = 45
+_album_messages = {}
+_album_tasks = {}
+
+# Group logging policy.
+NOTIFY_COOLDOWN_SECONDS = 300
+IMPORTANT_EVENTS = {
+    "system.startup_completed",
+    "system.startup_failed",
+    "system.shutdown_started",
+    "user.registered",
+}
+_notify_state = {}
+_stats = {"errors": 0, "warnings": 0, "last_error": None}
+SENSITIVE_KEYS = {
+    "sender_user_id", "recipient_user_id", "user_id", "telegram_user_id",
+    "chat_id", "source_chat_id", "destination_chat_id", "admin_user_id",
+    "active_user_id", "update_id", "telegram_update_id", "from_id", "uid",
+}
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
@@ -220,37 +245,34 @@ def sanitize_render_details(value, depth=0):
 
 def render_metadata():
     keys = {
-        "service_id": "RENDER_SERVICE_ID",
-        "service_name": "RENDER_SERVICE_NAME",
-        "instance_id": "RENDER_INSTANCE_ID",
-        "service_type": "RENDER_SERVICE_TYPE",
-        "git_commit": "RENDER_GIT_COMMIT",
-        "git_branch": "RENDER_GIT_BRANCH",
-        "external_url": "RENDER_EXTERNAL_URL",
-        "cpu_count": "RENDER_CPU_COUNT",
+        "service": "RENDER_SERVICE_NAME",
+        "repo": "RENDER_GIT_REPO_SLUG",
+        "branch": "RENDER_GIT_BRANCH",
+        "commit": "RENDER_GIT_COMMIT",
+        "url": "RENDER_EXTERNAL_URL",
     }
     return {name: os.getenv(env) for name, env in keys.items() if os.getenv(env)}
 
 
+def scrub(value):
+    """Remove numeric Telegram identifiers from anything that gets logged."""
+    if isinstance(value, dict):
+        return {k: scrub(v) for k, v in value.items() if str(k) not in SENSITIVE_KEYS}
+    if isinstance(value, (list, tuple)):
+        return [scrub(v) for v in value]
+    if isinstance(value, str):
+        return re.sub(r"-?\b\d{7,}\b", "[id]", value)
+    return value
+
+
 def make_log_record(event, level="INFO", **details):
     record = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "level": level.upper(),
-        "service": "anon",
-        "environment": "render" if os.getenv("RENDER") == "true" else "local",
         "event": event,
     }
-    request_id = REQUEST_ID.get()
-    if request_id:
-        record["request_id"] = request_id
-    update_id = UPDATE_ID.get()
-    if update_id is not None:
-        record["telegram_update_id"] = update_id
-    metadata = render_metadata()
-    if metadata:
-        record["render"] = metadata
     if details:
-        record["details"] = details
+        record["details"] = scrub(details)
     return record
 
 
@@ -288,7 +310,8 @@ async def db_post(table, payload, prefer="return=representation", params=None):
             error = r.json()
         except ValueError:
             error = {}
-        raise IntegrationError("supabase", "POST", resource=table, http_status=r.status_code,                               error_code=error.get("code"), error=safe_error_message(error.get("message")))
+        raise IntegrationError("supabase", "POST", resource=table, http_status=r.status_code,
+                               error_code=error.get("code"), error=safe_error_message(error.get("message")))
     try:
         return r.json() if r.content else []
     except ValueError:
@@ -477,6 +500,12 @@ def kind_of(m):
     if m.get("invoice"): return "invoice"
     return "text"
 
+def header_text(alias):
+    return f'<blockquote>Alias: <code>{html.escape(alias)}</code></blockquote>'
+
+def reply_params(message_id):
+    return {"message_id": message_id, "allow_sending_without_reply": True}
+
 async def map_outbound(user_mid,uid,admin_mid):
     await db_post("anon_outbound_map",{"user_message_id":user_mid,"sender_user_id":uid,"admin_message_id":admin_mid},"resolution=ignore-duplicates,return=minimal")
 
@@ -510,10 +539,40 @@ def utf16_length(value):
     return len(value.encode("utf-16-le")) // 2
 
 
+def should_notify_group(event, level):
+    """Only problems and a few notable events go to the log group."""
+    return level.upper() in ("WARNING", "ERROR", "CRITICAL") or event in IMPORTANT_EVENTS
+
+
+def notify_gate(event, level):
+    """Suppress repeats of the same problem for NOTIFY_COOLDOWN_SECONDS."""
+    if event in IMPORTANT_EVENTS:
+        return True, 0
+    now = time.monotonic()
+    state = _notify_state.get(event)
+    if state and now - state["at"] < NOTIFY_COOLDOWN_SECONDS:
+        state["suppressed"] += 1
+        return False, 0
+    suppressed = state["suppressed"] if state else 0
+    _notify_state[event] = {"at": now, "suppressed": 0}
+    return True, suppressed
+
+
 async def technical(event, level="INFO", notify_group=True, **details):
+    level = str(level).upper()
+    if level == "ERROR":
+        _stats["errors"] += 1
+        _stats["last_error"] = (event, datetime.now(timezone.utc))
+    elif level == "WARNING":
+        _stats["warnings"] += 1
+    notify = notify_group and should_notify_group(event, level)
+    if notify:
+        notify, suppressed = notify_gate(event, level)
+        if notify and suppressed:
+            details["repeated"] = suppressed
     record = make_log_record(event, level, **details)
     write_log_record(record)
-    if not notify_group:
+    if not notify:
         return record
     try:
         chat_id = await log_chat_id()
@@ -535,7 +594,7 @@ async def technical(event, level="INFO", notify_group=True, **details):
             await tg("sendRichMessage", {
                 "chat_id": chat_id,
                 "rich_message": {"markdown": rich_markdown},
-                "disable_notification": level.upper() in ("INFO",),
+                "disable_notification": level not in ("ERROR", "CRITICAL"),
             })
         except Exception as rich_exc:
             # Avoid duplicate delivery if Telegram accepted the request but the
@@ -553,6 +612,79 @@ async def technical(event, level="INFO", notify_group=True, **details):
         )
         write_log_record(failure)
     return record
+
+
+def format_duration(seconds):
+    seconds = int(seconds)
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+async def build_health_report():
+    lines = []
+    healthy = True
+
+    started = time.perf_counter()
+    try:
+        await db_get("anon_users", {"select": "alias", "limit": "1"})
+        lines.append(f"Database: ✅ {round((time.perf_counter() - started) * 1000)} ms")
+    except Exception:
+        healthy = False
+        lines.append("Database: ❌ unreachable")
+
+    try:
+        info = await tg("getWebhookInfo", {})
+        pending = info.get("pending_update_count", 0)
+        last_error = info.get("last_error_message")
+        mark = "✅" if not last_error and pending < 20 else "⚠️"
+        text = f"Telegram webhook: {mark} {pending} pending"
+        if last_error:
+            text += f" · last error: {safe_error_message(last_error)[:80]}"
+            healthy = False
+        lines.append(text)
+    except Exception:
+        healthy = False
+        lines.append("Telegram webhook: ❌ could not check")
+
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        stuck = await db_get("anon_album_buffer", {
+            "status": "eq.processing", "last_seen_at": f"lt.{cutoff}",
+            "select": "message_id", "limit": "50",
+        })
+        if stuck:
+            lines.append(f"Albums: ⚠️ {len(stuck)} parts stuck")
+    except Exception:
+        pass
+
+    errors = _stats["errors"]
+    line = f"Since start: {errors} errors, {_stats['warnings']} warnings"
+    if _stats["last_error"]:
+        event, when = _stats["last_error"]
+        line += f" (last: {event} at {when.strftime('%H:%M')} UTC)"
+    lines.append(line)
+
+    meta = render_metadata()
+    server = [meta.get("service"), meta.get("repo")]
+    if meta.get("branch") or meta.get("commit"):
+        server.append(f"{meta.get('branch', '')}@{(meta.get('commit') or '')[:7]}")
+    server_text = " · ".join(part for part in server if part)
+    if server_text:
+        lines.append(f"Server: {server_text}")
+    lines.append(f"Uptime: {format_duration(time.time() - _STARTED_AT)}")
+
+    head = "✅ Anon is healthy" if healthy else "⚠️ Anon has problems"
+    return head + "\n" + "\n".join(lines)
+
+
+async def send_health_report(chat_id):
+    await tg("sendMessage", {"chat_id": chat_id, "text": await build_health_report()})
 
 def edit_request(m, chat_id, message_id):
     if "text" in m:
@@ -597,9 +729,70 @@ async def edit_incoming_copy(m):
         if not telegram_permanent_rejection(exc):
             raise
 
-async def claim_album_messages(m, sender_uid, destination_uid, direction, reply_to=None):
+
+def remember_album_message(source_uid, group_id, m):
+    now = time.time()
+    for key in [k for k, v in _album_messages.items() if now - v["ts"] > 900]:
+        _album_messages.pop(key, None)
+    entry = _album_messages.setdefault((source_uid, group_id), {"ts": now, "messages": {}})
+    entry["ts"] = now
+    entry["messages"][m["message_id"]] = m
+
+
+def album_input_media(m):
+    if not m:
+        return None
+    if m.get("photo"):
+        item = {"type": "photo", "media": m["photo"][-1]["file_id"]}
+    elif m.get("video"):
+        item = {"type": "video", "media": m["video"]["file_id"]}
+    elif m.get("document"):
+        item = {"type": "document", "media": m["document"]["file_id"]}
+    elif m.get("audio"):
+        item = {"type": "audio", "media": m["audio"]["file_id"]}
+    else:
+        return None
+    if m.get("caption"):
+        item["caption"] = m["caption"]
+        if m.get("caption_entities"):
+            item["caption_entities"] = m["caption_entities"]
+    if item["type"] in ("photo", "video"):
+        if m.get("has_media_spoiler"):
+            item["has_spoiler"] = True
+        if m.get("show_caption_above_media"):
+            item["show_caption_above_media"] = True
+    return item
+
+
+async def copy_album(source_uid, destination_uid, group_id, message_ids, reply_target):
+    """Send an album in order. sendMediaGroup supports replying to a specific
+    message; copyMessages is the fallback when the original media is unknown."""
+    stored = _album_messages.get((source_uid, group_id), {}).get("messages", {})
+    media = [album_input_media(stored.get(mid)) for mid in message_ids]
+    if len(message_ids) > 1 and all(media):
+        payload = {"chat_id": destination_uid, "media": media}
+        if reply_target:
+            payload["reply_parameters"] = reply_params(reply_target)
+        try:
+            return await tg("sendMediaGroup", payload)
+        except Exception as exc:
+            if not telegram_permanent_rejection(exc):
+                raise
+    copy_payload = {
+        "chat_id": destination_uid,
+        "from_chat_id": source_uid,
+        "message_ids": message_ids,
+    }
+    if reply_target:
+        copy_payload["reply_parameters"] = {"message_id": reply_target}
+    return await tg("copyMessages", copy_payload)
+
+
+async def buffer_album_message(m, sender_uid, destination_uid, direction, reply_to=None):
+    """Fast path: store one album part. Returns (source, group, accepted)."""
     source_uid = ADMIN_ID if direction == "admin_to_user" else sender_uid
     group_id = str(m["media_group_id"])
+    remember_album_message(source_uid, group_id, m)
     group_filter = {
         "source_chat_id": f"eq.{source_uid}",
         "destination_chat_id": f"eq.{destination_uid}",
@@ -615,12 +808,11 @@ async def claim_album_messages(m, sender_uid, destination_uid, direction, reply_
             "message.album_late_part_rejected",
             "WARNING",
             direction=direction,
-            sender_user_id=sender_uid,
             media_group_id=group_id,
             message_id=m["message_id"],
             existing_states=sorted({row["status"] for row in existing}),
         )
-        return source_uid, group_id, []
+        return source_uid, group_id, False
 
     now = datetime.now(timezone.utc).isoformat()
     params = {
@@ -651,14 +843,24 @@ async def claim_album_messages(m, sender_uid, destination_uid, direction, reply_
         },
         {"last_seen_at": now},
     )
+    return source_uid, group_id, True
 
-    for delay in (1.2, 0.5, 0.5, 0.5):
-        await asyncio.sleep(delay)
+
+async def claim_album_messages(m, sender_uid, destination_uid, direction, reply_to=None):
+    source_uid, group_id, accepted = await buffer_album_message(
+        m, sender_uid, destination_uid, direction, reply_to
+    )
+    if not accepted:
+        return source_uid, group_id, []
+
+    await asyncio.sleep(ALBUM_QUIET_SECONDS + 0.3)
+    deadline = time.monotonic() + ALBUM_MAX_WAIT_SECONDS
+    while True:
         rows = await db_rpc("anon_claim_album", {
             "p_source_chat_id": source_uid,
             "p_destination_chat_id": destination_uid,
             "p_media_group_id": group_id,
-            "p_quiet_seconds": 1,
+            "p_quiet_seconds": ALBUM_QUIET_SECONDS,
         })
         if rows:
             if any(
@@ -674,7 +876,17 @@ async def claim_album_messages(m, sender_uid, destination_uid, direction, reply_
                 })
                 raise RuntimeError("Album buffer contains inconsistent routing data")
             return source_uid, group_id, rows
-    return source_uid, group_id, []
+        pending = await db_get("anon_album_buffer", {
+            "source_chat_id": f"eq.{source_uid}",
+            "destination_chat_id": f"eq.{destination_uid}",
+            "media_group_id": f"eq.{group_id}",
+            "status": "eq.pending",
+            "select": "message_id",
+            "limit": "1",
+        })
+        if not pending or time.monotonic() >= deadline:
+            return source_uid, group_id, []
+        await asyncio.sleep(1)
 
 
 async def finish_album(source_uid, destination_uid, group_id, mappings=None, status="delivered"):
@@ -687,7 +899,57 @@ async def finish_album(source_uid, destination_uid, group_id, mappings=None, sta
     })
 
 
+async def run_album_worker(key, factory):
+    try:
+        for attempt in range(4):
+            try:
+                await factory()
+                return
+            except Exception as exc:
+                if telegram_rate_limited(exc) and attempt < 3:
+                    await asyncio.sleep(2 + attempt * 2)
+                    continue
+                await technical("message.album_delivery_failed", "ERROR",
+                                **exception_fields(exc))
+                return
+    finally:
+        _album_tasks.pop(key, None)
+        _album_messages.pop((key[1], key[3]), None)
+
+
+def start_album_worker(key, factory):
+    task = _album_tasks.get(key)
+    if task is not None and not task.done():
+        return
+    _album_tasks[key] = asyncio.create_task(run_album_worker(key, factory))
+
+
 async def relay_album_to_admin(m, user, reply_to=None):
+    """Webhook-facing: buffer this part and return immediately."""
+    uid = m["from"]["id"]
+    source_uid, group_id, accepted = await buffer_album_message(
+        m, uid, ADMIN_ID, "user_to_admin", reply_to
+    )
+    if accepted:
+        start_album_worker(
+            ("user_to_admin", source_uid, ADMIN_ID, group_id),
+            lambda: deliver_album_to_admin(m, user, reply_to),
+        )
+
+
+async def relay_album_to_user(m, uid, reply_to=None):
+    """Webhook-facing: buffer this part and return immediately."""
+    source_uid, group_id, accepted = await buffer_album_message(
+        m, uid, uid, "admin_to_user", reply_to
+    )
+    if accepted:
+        start_album_worker(
+            ("admin_to_user", source_uid, uid, group_id),
+            lambda: deliver_album_to_user(m, uid, reply_to),
+        )
+
+
+async def deliver_album_to_admin(m, user, reply_to=None):
     uid = m["from"]["id"]
     source_uid, group_id, rows = await claim_album_messages(
         m, uid, ADMIN_ID, "user_to_admin", reply_to
@@ -712,7 +974,7 @@ async def relay_album_to_admin(m, user, reply_to=None):
         try:
             sent_header = await tg("sendMessage", {
                 "chat_id": ADMIN_ID,
-                "text": f'<blockquote>Chat: <code>{html.escape(user["alias"])}</code></blockquote>',
+                "text": header_text(user["alias"]),
                 "parse_mode": "HTML",
             })
         except Exception as exc:
@@ -770,21 +1032,14 @@ async def relay_album_to_admin(m, user, reply_to=None):
             sender_user_id=uid,
         )
 
-    copy_payload = {
-        "chat_id": ADMIN_ID,
-        "from_chat_id": source_uid,
-        "message_ids": message_ids,
-    }
     reply_target = next(
         (row.get("reply_to_message_id") for row in rows
          if row.get("reply_to_message_id")),
         None,
     )
-    if reply_target:
-        copy_payload["reply_parameters"] = {"message_id": reply_target}
 
     try:
-        copied = await tg("copyMessages", copy_payload)
+        copied = await copy_album(source_uid, ADMIN_ID, group_id, message_ids, reply_target)
     except Exception as exc:
         if telegram_rate_limited(exc):
             try:
@@ -884,7 +1139,7 @@ async def relay_album_to_admin(m, user, reply_to=None):
     )
 
 
-async def relay_album_to_user(m, uid, reply_to=None):
+async def deliver_album_to_user(m, uid, reply_to=None):
     source_uid, group_id, rows = await claim_album_messages(
         m, uid, uid, "admin_to_user", reply_to
     )
@@ -892,21 +1147,14 @@ async def relay_album_to_user(m, uid, reply_to=None):
         return
 
     message_ids = sorted(row["message_id"] for row in rows)
-    copy_payload = {
-        "chat_id": uid,
-        "from_chat_id": source_uid,
-        "message_ids": message_ids,
-    }
     reply_target = next(
         (row.get("reply_to_message_id") for row in rows
          if row.get("reply_to_message_id")),
         None,
     )
-    if reply_target:
-        copy_payload["reply_parameters"] = {"message_id": reply_target}
 
     try:
-        copied = await tg("copyMessages", copy_payload)
+        copied = await copy_album(source_uid, uid, group_id, message_ids, reply_target)
     except Exception as exc:
         if telegram_rate_limited(exc):
             try:
@@ -914,7 +1162,7 @@ async def relay_album_to_user(m, uid, reply_to=None):
             except Exception as persist_exc:
                 await technical(
                     "message.album_retry_state_failed", "ERROR",
-                    direction="admin_to_user", recipient_user_id=uid,
+                    direction="admin_to_user",
                     **exception_fields(persist_exc),
                 )
             raise
@@ -929,7 +1177,7 @@ async def relay_album_to_user(m, uid, reply_to=None):
         except Exception as persist_exc:
             await technical(
                 "message.album_terminal_state_persistence_failed", "ERROR",
-                direction="admin_to_user", recipient_user_id=uid,
+                direction="admin_to_user",
                 terminal_status=terminal_status,
                 **exception_fields(persist_exc),
             )
@@ -939,7 +1187,6 @@ async def relay_album_to_user(m, uid, reply_to=None):
             else "message.album_delivery_outcome_unknown",
             "ERROR",
             direction="admin_to_user",
-            recipient_user_id=uid,
             automatic_retry_suppressed=True,
             **exception_fields(exc),
         )
@@ -953,13 +1200,12 @@ async def relay_album_to_user(m, uid, reply_to=None):
                 "message.album_unmapped_state_persistence_failed",
                 "ERROR",
                 direction="admin_to_user",
-                recipient_user_id=uid,
                 delivery_result_received=True,
                 **exception_fields(exc),
             )
         await technical(
             "message.album_copy_incomplete", "ERROR",
-            direction="admin_to_user", recipient_user_id=uid,
+            direction="admin_to_user",
             source_message_count=len(message_ids),
             copied_message_count=len(copied) if isinstance(copied, list) else None,
             delivery_already_attempted=True,
@@ -978,7 +1224,7 @@ async def relay_album_to_user(m, uid, reply_to=None):
     except Exception as exc:
         await technical(
             "message.album_mapping_persistence_failed", "ERROR",
-            direction="admin_to_user", recipient_user_id=uid,
+            direction="admin_to_user",
             message_count=len(message_ids), delivery_already_completed=True,
             **exception_fields(exc),
         )
@@ -1010,7 +1256,7 @@ async def relay_live(m,user,reply_to=None):
         header=(now-last).total_seconds()>=600
     if header:
         try:
-            h=await tg("sendMessage",{"chat_id":ADMIN_ID,"text":f'<blockquote>Chat: <code>{html.escape(user["alias"])}</code></blockquote>',"parse_mode":"HTML"})
+            h=await tg("sendMessage",{"chat_id":ADMIN_ID,"text":header_text(user["alias"]),"parse_mode":"HTML"})
         except Exception as exc:
             if telegram_rate_limited(exc):
                 raise
@@ -1043,7 +1289,7 @@ async def relay_live(m,user,reply_to=None):
             sender_user_id=uid,
         )
     p={"chat_id":ADMIN_ID,"from_chat_id":uid,"message_id":m["message_id"]}
-    if reply_to: p["reply_parameters"]={"message_id":reply_to}
+    if reply_to: p["reply_parameters"]=reply_params(reply_to)
     try:
         cp=await tg("copyMessage",p)
     except Exception as exc:
@@ -1086,12 +1332,13 @@ async def relay_live(m,user,reply_to=None):
 async def handle_user(m,user):
     uid=m["from"]["id"]
     if user.get("blocked_by_admin"):
-        await technical("message.rejected_blocked_user", "WARNING", alias=user["alias"],
-                        message_type=kind_of(m))
+        await technical("message.rejected_blocked_user", "WARNING", notify_group=False,
+                        alias=user["alias"], message_type=kind_of(m))
         await react_status(uid,m["message_id"],False)
         return
     if not await rate_ok(uid):
-        await technical("message.rate_limited", "WARNING", alias=user["alias"])
+        await technical("message.rate_limited", "WARNING", notify_group=False,
+                        alias=user["alias"])
         return
 
     kind=kind_of(m)
@@ -1165,7 +1412,7 @@ async def send_to_user(m,uid,reply_to=None):
         return
 
     p={"chat_id":uid,"from_chat_id":ADMIN_ID,"message_id":m["message_id"]}
-    if reply_to: p["reply_parameters"]={"message_id":reply_to}
+    if reply_to: p["reply_parameters"]=reply_params(reply_to)
     cp=await tg("copyMessage",p)
     await persist_after_delivery(
         lambda: map_outbound(cp["message_id"], uid, m["message_id"]),
@@ -1216,7 +1463,6 @@ async def route_admin(m):
                     await technical(
                         "message.admin_album_delivery_failed",
                         "ERROR",
-                        recipient_user_id=uid,
                         **exception_fields(exc),
                     )
                     await react(ADMIN_ID, m["message_id"], "👎")
@@ -1294,6 +1540,10 @@ async def route_admin(m):
 
 async def admin_command(message):
     text = message.get("text", "")
+    if re.fullmatch(r"/health(?:@\w+)?\s*", text, re.I):
+        # /health only works inside the log group; never relay it to a user.
+        await react(ADMIN_ID, message["message_id"], "👎")
+        return True
     match=re.fullmatch(r"/i(?:@\w+)?(?:\s+(.+))?\s*",text,re.I)
     if match:
         arg=(match.group(1) or "").strip()
@@ -1468,23 +1718,24 @@ async def request_observability(request: Request, call_next):
         response = await call_next(request)
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
         status = response.status_code
-        level = "ERROR" if status >= 500 else "WARNING" if status >= 400 else "INFO"
-        await technical(
-            "http.request_completed",
-            level,
-            notify_group=(status >= 500 or duration_ms >= 1500),
-            method=request.method,
-            path=request.url.path,
-            status_code=status,
-            duration_ms=duration_ms,
-            render_request_id=incoming_id,
-        )
+        if status >= 400:
+            # Failures are already reported by the code that raised them.
+            await technical(
+                "http.request_completed",
+                "ERROR" if status >= 500 else "WARNING",
+                notify_group=False,
+                method=request.method,
+                path=request.url.path,
+                status_code=status,
+                duration_ms=duration_ms,
+            )
         response.headers["Rndr-Id"] = request_id
         return response
     except Exception as exc:
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
         await technical(
-            "http.request_exception",            "ERROR",
+            "http.request_exception",
+            "ERROR",
             method=request.method,
             path=request.url.path,
             duration_ms=duration_ms,
@@ -1532,7 +1783,7 @@ async def render_webhook(request: Request):
     service_id = event_data.get("serviceId")
     if RENDER_SERVICE_ID and service_id != RENDER_SERVICE_ID:
         await technical("render.unrelated_service_event_ignored", notify_group=False,
-                        event_id=event_id, event_type=event_type, service_id=service_id)
+                        event_type=event_type)
         return {"ok": True, "ignored": True}
 
     event_status = event_data.get("status")
@@ -1543,7 +1794,7 @@ async def render_webhook(request: Request):
 
     platform_details = None
     details_error = None
-    if RENDER_API_KEY:
+    if RENDER_API_KEY and level != "INFO":
         try:
             full_event = await asyncio.wait_for(fetch_render_event_details(event_id), timeout=4.5)
             if isinstance(full_event, dict):
@@ -1553,10 +1804,6 @@ async def render_webhook(request: Request):
 
     log_kwargs = {
         "platform_event": event_type,
-        "event_id": event_id,
-        "occurred_at": payload.get("timestamp"),
-        "service_id": service_id,
-        "service_name": event_data.get("serviceName"),
         "status": event_status,
     }
     if platform_details is not None:
@@ -1572,7 +1819,7 @@ async def render_webhook(request: Request):
     except asyncio.TimeoutError:
         write_log_record(make_log_record(
             "render.telegram_forward_timeout", "WARNING",
-            event_id=event_id, platform_event=event_type,
+            platform_event=event_type,
         ))
     return {"ok": True}
 
@@ -1611,7 +1858,6 @@ async def webhook(request: Request):
                         "telegram.update_lease_expired_unknown",
                         "ERROR",
                         notify_group=False,
-                        update_id=update_id,
                         automatic_retry_suppressed=True,
                     )
                     return {"ok": True, "unknown": True}
@@ -1662,6 +1908,14 @@ async def webhook(request: Request):
             except Exception as exc:
                 await technical("telegram.unregistered_group_leave_failed", "ERROR",
                                 notify_group=False, **exception_fields(exc))
+            return await ack_update(update_id, lease_token)
+        if (uid == ADMIN_ID and not edited
+                and re.fullmatch(r"/health(?:@\w+)?\s*", message.get("text", ""), re.I)):
+            try:
+                await send_health_report(chat["id"])
+            except Exception as exc:
+                await technical("system.health_report_failed", "ERROR",
+                                notify_group=False, **exception_fields(exc))
         return await ack_update(update_id, lease_token)
 
     if uid == ADMIN_ID:
@@ -1680,7 +1934,8 @@ async def webhook(request: Request):
         try:
             await route_admin(message)
         except Exception as exc:
-            await technical("admin.routing_failed", "ERROR", **exception_fields(exc))
+            await technical("admin.routing_failed", "ERROR", notify_group=False,
+                            **exception_fields(exc))
             if update_id is not None: await unmark_update(update_id, lease_token)
             raise HTTPException(status_code=503, detail="admin routing failed")
         return await ack_update(update_id, lease_token)
@@ -1689,7 +1944,8 @@ async def webhook(request: Request):
         try:
             await edit_incoming_copy(message)
         except Exception as exc:
-            await technical("message.incoming_edit_handler_failed", "ERROR", **exception_fields(exc))
+            await technical("message.incoming_edit_handler_failed", "ERROR",
+                            notify_group=False, **exception_fields(exc))
             if not telegram_permanent_rejection(exc):
                 if update_id is not None:
                     await unmark_update(update_id, lease_token)
@@ -1732,8 +1988,9 @@ async def webhook(request: Request):
     try:
         await handle_user(message, user)
     except Exception as exc:
-        await technical("message.webhook_handler_failed", "ERROR", alias=user["alias"],
-                        message_type=kind_of(message), **exception_fields(exc))
+        await technical("message.webhook_handler_failed", "ERROR", notify_group=False,
+                        alias=user["alias"], message_type=kind_of(message),
+                        **exception_fields(exc))
         if update_id is not None:
             await unmark_update(update_id, lease_token)
         raise HTTPException(status_code=503, detail="relay failed")
@@ -1751,9 +2008,7 @@ async def startup():
                 "secret_token": WEBHOOK_SECRET,
                 "allowed_updates": ["message", "edited_message", "my_chat_member"]
             })
-            await technical("system.startup_completed", database="connected",
-                            telegram_webhook="configured",
-                            allowed_updates=["message", "edited_message", "my_chat_member"])
+            await technical("system.startup_completed")
         except Exception as exc:
             await technical("system.startup_failed", "ERROR", **exception_fields(exc))
     else:

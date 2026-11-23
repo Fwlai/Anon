@@ -1,3 +1,5 @@
+import asyncio
+import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -30,10 +32,16 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "finish_album", new=AsyncMock()) as finish, \
              patch.object(main, "db_post", new=AsyncMock()), \
              patch.object(main, "technical", new=AsyncMock()):
-            await main.relay_album_to_admin(message, {
+            await main.deliver_album_to_admin(message, {
                 "telegram_user_id": 123, "alias": "Blue-01"
             })
 
+        header_call = next(call for call in tg.await_args_list
+                           if call.args[0] == "sendMessage")
+        self.assertEqual(
+            header_call.args[1]["text"],
+            "<blockquote>Alias: <code>Blue-01</code></blockquote>",
+        )
         copy_call = next(call for call in tg.await_args_list
                          if call.args[0] == "copyMessages")
         self.assertEqual(copy_call.args[1], {
@@ -70,7 +78,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "get_user", new=AsyncMock(return_value={
                  "alias": "Blue-01"
              })), patch.object(main, "technical", new=AsyncMock()):
-            await main.relay_album_to_user(message, 123)
+            await main.deliver_album_to_user(message, 123)
 
         tg.assert_awaited_once_with("copyMessages", {
             "chat_id": 123,
@@ -104,7 +112,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "finish_album", new=AsyncMock()) as finish, \
              patch.object(main, "technical", new=AsyncMock()):
             with self.assertRaises(main.IntegrationError):
-                await main.relay_album_to_admin(message, {
+                await main.deliver_album_to_admin(message, {
                     "telegram_user_id": 123, "alias": "Blue-01"
                 })
 
@@ -160,7 +168,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "finish_album", new=AsyncMock()) as finish, \
              patch.object(main, "react_status", new=AsyncMock()) as react_status, \
              patch.object(main, "technical", new=AsyncMock()):
-            await main.relay_album_to_admin(message, {
+            await main.deliver_album_to_admin(message, {
                 "telegram_user_id": 123, "alias": "Blue-01"
             })
 
@@ -193,7 +201,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "finish_album", new=AsyncMock()) as finish, \
              patch.object(main, "react_status", new=AsyncMock()), \
              patch.object(main, "technical", new=AsyncMock()):
-            await main.relay_album_to_admin(message, {
+            await main.deliver_album_to_admin(message, {
                 "telegram_user_id": 123, "alias": "Blue-01"
             })
 
@@ -238,11 +246,11 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "technical", new=AsyncMock()),
         ):
             with self.assertRaises(main.IntegrationError):
-                await main.relay_album_to_admin(message, {
+                await main.deliver_album_to_admin(message, {
                     "telegram_user_id": 123, "alias": "Blue-01"
                 })
 
-            await main.relay_album_to_admin(message, {
+            await main.deliver_album_to_admin(message, {
                 "telegram_user_id": 123, "alias": "Blue-01"
             })
 
@@ -259,7 +267,6 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
         map_header.assert_awaited_once_with(900, 123)
         self.assertEqual(db_post.await_count, 2)
         self.assertEqual(finish.await_count, 2)
-
 
 
     async def test_album_header_rate_limit_releases_claim_for_retry(self):
@@ -289,7 +296,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "technical", new=AsyncMock()),
         ):
             with self.assertRaises(main.IntegrationError):
-                await main.relay_album_to_admin(message, {
+                await main.deliver_album_to_admin(message, {
                     "telegram_user_id": 123, "alias": "Blue-01"
                 })
 
@@ -324,7 +331,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "react_status", new=AsyncMock()) as react_status,
             patch.object(main, "technical", new=AsyncMock()) as technical,
         ):
-            await main.relay_album_to_admin(message, {
+            await main.deliver_album_to_admin(message, {
                 "telegram_user_id": 123, "alias": "Blue-01"
             })
 
@@ -336,6 +343,104 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
             call.args[0] == "message.album_header_outcome_unknown"
             for call in technical.await_args_list
         ))
+
+
+class AlbumSendingTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        main._album_messages.clear()
+        main._album_tasks.clear()
+
+    async def test_album_with_reply_uses_send_media_group_in_order(self):
+        main._album_messages[(123, "album-mg")] = {
+            "ts": time.time(),
+            "messages": {
+                101: {"message_id": 101, "caption": "hi",
+                      "photo": [{"file_id": "small"}, {"file_id": "big"}]},
+                102: {"message_id": 102, "video": {"file_id": "vid"}},
+            },
+        }
+        sent = [{"message_id": 1}, {"message_id": 2}]
+
+        with patch.object(main, "tg", new=AsyncMock(return_value=sent)) as tg:
+            result = await main.copy_album(
+                123, main.ADMIN_ID, "album-mg", [101, 102], 555
+            )
+
+        self.assertEqual(result, sent)
+        tg.assert_awaited_once_with("sendMediaGroup", {
+            "chat_id": main.ADMIN_ID,
+            "media": [
+                {"type": "photo", "media": "big", "caption": "hi"},
+                {"type": "video", "media": "vid"},
+            ],
+            "reply_parameters": {
+                "message_id": 555, "allow_sending_without_reply": True
+            },
+        })
+
+    async def test_permanent_media_group_rejection_falls_back_to_copy(self):
+        main._album_messages[(123, "album-fb")] = {
+            "ts": time.time(),
+            "messages": {
+                101: {"message_id": 101, "photo": [{"file_id": "a"}]},
+                102: {"message_id": 102, "photo": [{"file_id": "b"}]},
+            },
+        }
+        rejected = main.IntegrationError(
+            "telegram", "sendMediaGroup", error_code=400, http_status=400
+        )
+        copied = [{"message_id": 7}, {"message_id": 8}]
+
+        with patch.object(main, "tg", new=AsyncMock(
+            side_effect=[rejected, copied]
+        )) as tg:
+            result = await main.copy_album(
+                123, main.ADMIN_ID, "album-fb", [101, 102], None
+            )
+
+        self.assertEqual(result, copied)
+        self.assertEqual(tg.await_args_list[1].args[0], "copyMessages")
+
+    async def test_album_parts_return_fast_and_start_one_background_worker(self):
+        message = {
+            "message_id": 401,
+            "from": {"id": 123},
+            "media_group_id": "album-fast",
+            "photo": [{}],
+        }
+        user = {"alias": "Blue-01"}
+
+        with patch.object(main, "buffer_album_message", new=AsyncMock(
+            return_value=(123, "album-fast", True)
+        )), patch.object(main, "deliver_album_to_admin", new=AsyncMock()) as deliver:
+            await main.relay_album_to_admin(message, user)
+            await main.relay_album_to_admin(dict(message, message_id=402), user)
+            await asyncio.gather(*list(main._album_tasks.values()))
+
+        deliver.assert_awaited_once()
+        self.assertEqual(main._album_tasks, {})
+
+    async def test_rate_limited_album_is_retried_in_background(self):
+        message = {
+            "message_id": 403,
+            "from": {"id": 123},
+            "media_group_id": "album-retry",
+        }
+        failure = main.IntegrationError(
+            "telegram", "copyMessages", error_code=429, http_status=429
+        )
+
+        with patch.object(main, "buffer_album_message", new=AsyncMock(
+            return_value=(123, "album-retry", True)
+        )), patch.object(main, "deliver_album_to_admin", new=AsyncMock(
+            side_effect=[failure, None]
+        )) as deliver, patch.object(main.asyncio, "sleep", new=AsyncMock()), \
+             patch.object(main, "technical", new=AsyncMock()):
+            await main.relay_album_to_admin(message, {"alias": "Blue-01"})
+            await asyncio.gather(*list(main._album_tasks.values()))
+
+        self.assertEqual(deliver.await_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -56,6 +56,9 @@ class RenderWebhookVerificationTests(unittest.TestCase):
 
 
 class StructuredLogTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        main._notify_state.clear()
+
     def test_log_record_is_json_serializable(self):
         record = main.make_log_record("test.event", "WARNING", count=3)
         decoded = json.loads(json.dumps(record))
@@ -63,11 +66,53 @@ class StructuredLogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decoded["level"], "WARNING")
         self.assertEqual(decoded["details"]["count"], 3)
 
+    def test_log_record_hides_numeric_ids_and_platform_metadata(self):
+        record = main.make_log_record(
+            "test.privacy", "ERROR",
+            sender_user_id=5272351424,
+            recipient_user_id=6530793575,
+            alias="Blue-01",
+            error="chat 5272351424 not found",
+            nested={"chat_id": 123456789, "message_id": 42},
+        )
+        dumped = json.dumps(record)
+        self.assertNotIn("5272351424", dumped)
+        self.assertNotIn("6530793575", dumped)
+        self.assertNotIn("123456789", dumped)
+        self.assertEqual(record["details"]["alias"], "Blue-01")
+        self.assertEqual(record["details"]["nested"], {"message_id": 42})
+        for hidden in ("render", "service", "environment", "request_id"):
+            self.assertNotIn(hidden, record)
+
+    def test_only_problems_and_notable_events_reach_the_group(self):
+        self.assertFalse(main.should_notify_group("message.forwarded_to_admin", "INFO"))
+        self.assertFalse(main.should_notify_group("message.received", "INFO"))
+        self.assertTrue(main.should_notify_group("message.delivery_rejected", "ERROR"))
+        self.assertTrue(main.should_notify_group("system.startup_completed", "INFO"))
+        self.assertTrue(main.should_notify_group("system.shutdown_started", "INFO"))
+
+    async def test_routine_info_event_is_not_sent_to_the_group(self):
+        with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)), \
+             patch.object(main, "tg", new=AsyncMock()) as tg_mock, \
+             patch.object(main, "write_log_record"):
+            await main.technical("message.forwarded_to_admin", "INFO", alias="Blue-01")
+
+        tg_mock.assert_not_awaited()
+
+    async def test_repeated_error_is_sent_once_per_cooldown(self):
+        with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)), \
+             patch.object(main, "tg", new=AsyncMock(return_value={"message_id": 1})) as tg_mock, \
+             patch.object(main, "write_log_record"):
+            for _ in range(3):
+                await main.technical("test.repeat", "ERROR")
+
+        tg_mock.assert_awaited_once()
+
     async def test_technical_sends_only_one_rich_message(self):
         with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)), \
              patch.object(main, "tg", new=AsyncMock(return_value={"message_id": 1})) as tg_mock, \
              patch.object(main, "write_log_record"):
-            await main.technical("test.event", "INFO", sample="value")
+            await main.technical("test.event", "ERROR", sample="value")
         tg_mock.assert_awaited_once()
         self.assertEqual(tg_mock.await_args.args[0], "sendRichMessage")
         self.assertIn("rich_message", tg_mock.await_args.args[1])
@@ -123,7 +168,7 @@ class StructuredLogTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, "log_chat_id", new=AsyncMock(return_value=None)), \
              patch.object(main, "tg", new=AsyncMock()) as tg_mock, \
              patch.object(main, "write_log_record"):
-            record = await main.technical("test.no_group")
+            record = await main.technical("test.no_group", "ERROR")
 
         self.assertEqual(record["event"], "test.no_group")
         tg_mock.assert_not_awaited()
@@ -135,7 +180,7 @@ class StructuredLogTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)), \
              patch.object(main, "tg", new=AsyncMock(side_effect=failure)) as tg_mock, \
              patch.object(main, "write_log_record") as write_log:
-            await main.technical("test.delivery_failure")
+            await main.technical("test.delivery_failure", "ERROR")
 
         tg_mock.assert_awaited_once()
         self.assertEqual(tg_mock.await_args.args[0], "sendRichMessage")
@@ -149,6 +194,29 @@ class StructuredLogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["deploy"]["status"], "failed")
         self.assertNotIn("trigger", result)
         self.assertNotIn("private@example.com", json.dumps(result))
+
+
+class HealthCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_health_report_summarizes_state_without_user_ids(self):
+        async def fake_tg(method, payload):
+            return {"pending_update_count": 0}
+
+        with patch.object(main, "db_get", new=AsyncMock(return_value=[])), \
+             patch.object(main, "tg", new=AsyncMock(side_effect=fake_tg)):
+            report = await main.build_health_report()
+
+        self.assertTrue(report.startswith("✅ Anon is healthy"))
+        self.assertIn("Database: ✅", report)
+        self.assertIn("Telegram webhook: ✅ 0 pending", report)
+        self.assertIn("Uptime:", report)
+
+    async def test_health_in_admin_private_chat_is_never_relayed(self):
+        message = {"message_id": 700, "text": "/health"}
+        with patch.object(main, "react", new=AsyncMock()) as react:
+            handled = await main.admin_command(message)
+
+        self.assertTrue(handled)
+        react.assert_awaited_once_with(main.ADMIN_ID, 700, "👎")
 
 
 if __name__ == "__main__":
