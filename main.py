@@ -491,6 +491,14 @@ async def allocate_alias(uid):
 async def set_block(uid, field, value):
     await db_patch("anon_users", {"telegram_user_id": f"eq.{uid}"}, {field: value})
 
+
+async def set_open(uid, value):
+    await db_patch(
+        "anon_users",
+        {"telegram_user_id": f"eq.{uid}"},
+        {"is_open": bool(value)},
+    )
+
 async def send_user(uid, text, parse_mode=None):
     payload = {"chat_id": uid, "text": text}
     if parse_mode:
@@ -543,6 +551,17 @@ def kind_of(m):
 
 def header_text(alias):
     return f'<blockquote>Alias: <code>{html.escape(alias)}</code></blockquote>'
+
+
+def header_reply_markup(user):
+    uid = int(user["telegram_user_id"])
+    return {
+        "inline_keyboard": [[{
+            "text": "open",
+            "style": "success" if user.get("is_open") else "danger",
+            "callback_data": f"anon:open:{uid}",
+        }]]
+    }
 
 
 def reply_params(message_id):
@@ -1117,6 +1136,7 @@ async def deliver_album_to_admin(m, user, reply_to=None):
                 "chat_id": ADMIN_ID,
                 "text": header_text(user["alias"]),
                 "parse_mode": "HTML",
+                "reply_markup": header_reply_markup(user),
             })
         except Exception as exc:
             if telegram_rate_limited(exc):
@@ -1411,7 +1431,12 @@ async def relay_live(m,user,reply_to=None):
         header=(now-last).total_seconds()>=600
     if header:
         try:
-            h=await tg("sendMessage",{"chat_id":ADMIN_ID,"text":header_text(user["alias"]),"parse_mode":"HTML"})
+            h=await tg("sendMessage",{
+                "chat_id":ADMIN_ID,
+                "text":header_text(user["alias"]),
+                "parse_mode":"HTML",
+                "reply_markup":header_reply_markup(user),
+            })
         except Exception as exc:
             if telegram_rate_limited(exc):
                 raise
@@ -1588,10 +1613,65 @@ async def open_alias(alias,cmdid):
     u=await get_alias(alias)
     if not u or u.get("blocked_by_admin"):
         await react(ADMIN_ID,cmdid,"👎")
-        return
+        return False
     uid=u["telegram_user_id"]
     await set_active(uid)
+    await set_open(uid, True)
     await technical("admin.chat_selected", alias=u["alias"])
+    return True
+
+
+async def handle_admin_callback(query):
+    callback_id = query.get("id")
+    sender_id = (query.get("from") or {}).get("id")
+    message = query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    data = query.get("data", "")
+
+    if sender_id != ADMIN_ID or chat_id != ADMIN_ID:
+        await tg("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": "Not authorized",
+            "show_alert": True,
+        })
+        return
+
+    match = re.fullmatch(r"anon:open:(\d+)", data)
+    if not match:
+        await tg("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": "Invalid button",
+            "show_alert": True,
+        })
+        return
+
+    user = await get_user(int(match.group(1)))
+    if not user or user.get("blocked_by_admin"):
+        await tg("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": "This chat is unavailable",
+            "show_alert": True,
+        })
+        return
+
+    opened = await open_alias(user["alias"], message.get("message_id"))
+    if not opened:
+        await tg("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": "This chat is unavailable",
+            "show_alert": True,
+        })
+        return
+
+    await tg("editMessageReplyMarkup", {
+        "chat_id": chat_id,
+        "message_id": message["message_id"],
+        "reply_markup": header_reply_markup({**user, "is_open": True}),
+    })
+    await tg("answerCallbackQuery", {
+        "callback_query_id": callback_id,
+        "text": "Chat opened",
+    })
 
 async def mapped_admin_reply_target_for_user(uid, admin_message_id):
     rows = await db_get("anon_message_map", {
@@ -1750,7 +1830,12 @@ async def admin_command(message):
             await react(ADMIN_ID,message["message_id"],"👎")
         return True
     if re.fullmatch(r"/c(?:@\w+)?\s*",text,re.I):
-        await set_active(None); await technical("admin.chat_closed")
+        state = await admin_state()
+        active_uid = state.get("active_user_id")
+        if active_uid is not None:
+            await set_open(active_uid, False)
+        await set_active(None)
+        await technical("admin.chat_closed")
         return True
     match = re.fullmatch(r"/block(?:@\w+)?\s+([A-Za-z]+-\d{2})\s*", text, re.I)
     if match:
@@ -2042,8 +2127,9 @@ async def webhook(request: Request):
     update = await request.json()
     update_id = update.get("update_id")
     UPDATE_ID.set(update_id)
-    update_type = next((key for key in ("message", "edited_message", "my_chat_member")
-                        if key in update), "unknown")
+    update_type = next((key for key in (
+        "message", "edited_message", "callback_query", "my_chat_member"
+    ) if key in update), "unknown")
     await technical("telegram.update_received", notify_group=False,
                     update_type=update_type)
     lease_token = None
@@ -2089,6 +2175,17 @@ async def webhook(request: Request):
                     await technical("telegram.unregistered_group_leave_failed", "ERROR",
                                     notify_group=False, **exception_fields(exc))
         return await ack_update(update_id, lease_token)
+    callback_query = update.get("callback_query")
+    if callback_query:
+        try:
+            await handle_admin_callback(callback_query)
+        except Exception as exc:
+            await technical("admin.callback_failed", "ERROR", **exception_fields(exc))
+            if update_id is not None:
+                await unmark_update(update_id, lease_token)
+            raise HTTPException(status_code=503, detail="callback handling failed")
+        return await ack_update(update_id, lease_token)
+
     edited = update.get("edited_message")
     message = update.get("message") or edited
     if not message:
@@ -2211,7 +2308,7 @@ async def startup():
             await tg("setWebhook", {
                 "url": f"{base_url}/telegram/webhook",
                 "secret_token": WEBHOOK_SECRET,
-                "allowed_updates": ["message", "edited_message", "my_chat_member"]
+                "allowed_updates": ["message", "edited_message", "callback_query", "my_chat_member"]
             })
             _album_recovery_task = asyncio.create_task(album_recovery_loop())
             await technical("system.startup_completed")
