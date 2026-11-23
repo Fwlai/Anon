@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - fix/anon-reliability-20261122
+      - fix/anon-durable-album-recovery
   pull_request:
     branches:
       - main
@@ -62,13 +63,17 @@ jobs:
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_album_insert_guard.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_retention_indexes.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_update_leases.sql
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261123_anon_album_recovery.sql
       - name: Verify migrations are safely repeatable
         run: |
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_album_copy.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_album_insert_guard.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_retention_indexes.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_update_leases.sql
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261123_anon_album_recovery.sql
       - name: Verify album routing, claims, mappings, late-part guard, and indexes
         run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/sql/album_migrations_test.sql
+      - name: Verify durable album recovery and processing leases
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/sql/album_recovery_test.sql
       - name: Verify concurrent claim and late insert serialization
         run: bash tests/sql/album_concurrency_test.sh

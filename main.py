@@ -59,8 +59,11 @@ _STARTED_AT = time.time()
 # once no new part has arrived for ALBUM_QUIET_SECONDS.
 ALBUM_QUIET_SECONDS = 3
 ALBUM_MAX_WAIT_SECONDS = 45
+ALBUM_PROCESSING_LEASE_SECONDS = 300
+ALBUM_RECOVERY_INTERVAL_SECONDS = 5
 _album_messages = {}
 _album_tasks = {}
+_album_recovery_task = None
 
 # Group logging policy.
 NOTIFY_COOLDOWN_SECONDS = 300
@@ -653,15 +656,25 @@ async def build_health_report():
         lines.append("Telegram webhook: ❌ could not check")
 
     try:
-        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
-        stuck = await db_get("anon_album_buffer", {
-            "status": "eq.processing", "last_seen_at": f"lt.{cutoff}",
-            "select": "message_id", "limit": "50",
+        unknown = await db_get("anon_album_buffer", {
+            "status": "eq.unknown", "select": "message_id", "limit": "1",
         })
-        if stuck:
-            lines.append(f"Albums: ⚠️ {len(stuck)} parts stuck")
+        pending = await db_get("anon_album_buffer", {
+            "status": "eq.pending", "select": "message_id", "limit": "1",
+        })
+        processing = await db_get("anon_album_buffer", {
+            "status": "eq.processing", "select": "message_id", "limit": "1",
+        })
+        if unknown:
+            healthy = False
+            lines.append("Albums: ⚠️ ambiguous deliveries need manual review")
+        elif pending or processing:
+            lines.append("Albums: ✅ recovery queue active")
+        else:
+            lines.append("Albums: ✅ no queued work")
     except Exception:
-        pass
+        healthy = False
+        lines.append("Albums: ❌ recovery queue unavailable")
 
     errors = _stats["errors"]
     line = f"Since start: {errors} errors, {_stats['warnings']} warnings"
@@ -924,6 +937,103 @@ def start_album_worker(key, factory):
     _album_tasks[key] = asyncio.create_task(run_album_worker(key, factory))
 
 
+async def recover_pending_albums_once():
+    """Recreate workers for quiet, durable album groups after process restarts."""
+    expired_items = await db_rpc("anon_expire_stale_albums", {
+        "p_lease_seconds": ALBUM_PROCESSING_LEASE_SECONDS,
+    })
+    if isinstance(expired_items, int) and expired_items:
+        await technical(
+            "message.album_stale_processing_marked_unknown",
+            "ERROR",
+            notify_group=False,
+            item_count=expired_items,
+        )
+
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(seconds=ALBUM_QUIET_SECONDS)
+    ).isoformat()
+    rows = await db_get("anon_album_buffer", {
+        "status": "eq.pending",
+        "last_seen_at": f"lt.{cutoff}",
+        "select": (
+            "source_chat_id,destination_chat_id,sender_user_id,direction,"
+            "media_group_id,message_id"
+        ),
+        "order": "created_at.asc",
+        "limit": "500",
+    })
+
+    groups = {}
+    for row in rows:
+        key = (
+            row["source_chat_id"],
+            row["destination_chat_id"],
+            str(row["media_group_id"]),
+        )
+        groups.setdefault(key, []).append(row)
+
+    started = 0
+    for (source_uid, destination_uid, group_id), items in groups.items():
+        direction = items[0]["direction"]
+        sender_uid = items[0]["sender_user_id"]
+        message = {
+            "message_id": max(item["message_id"] for item in items),
+            "media_group_id": group_id,
+            "from": {"id": sender_uid},
+        }
+        worker_key = (direction, source_uid, destination_uid, group_id)
+        current = _album_tasks.get(worker_key)
+        if current is not None and not current.done():
+            continue
+
+        if direction == "user_to_admin":
+            user = await get_user(sender_uid)
+            if not user:
+                await technical(
+                    "message.album_recovery_user_missing",
+                    "ERROR",
+                    notify_group=False,
+                    message_count=len(items),
+                )
+                continue
+            start_album_worker(
+                worker_key,
+                lambda m=message, u=user: deliver_album_to_admin(m, u),
+            )
+        elif direction == "admin_to_user":
+            start_album_worker(
+                worker_key,
+                lambda m=message, uid=destination_uid: deliver_album_to_user(m, uid),
+            )
+        else:
+            await technical(
+                "message.album_recovery_invalid_direction",
+                "ERROR",
+                notify_group=False,
+            )
+            continue
+        started += 1
+
+    return started
+
+
+async def album_recovery_loop():
+    while True:
+        try:
+            await recover_pending_albums_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await technical(
+                "message.album_recovery_scan_failed",
+                "WARNING",
+                notify_group=False,
+                **exception_fields(exc),
+            )
+        await asyncio.sleep(ALBUM_RECOVERY_INTERVAL_SECONDS)
+
+
 async def relay_album_to_admin(m, user, reply_to=None):
     """Webhook-facing: buffer this part and return immediately."""
     uid = m["from"]["id"]
@@ -958,6 +1068,18 @@ async def deliver_album_to_admin(m, user, reply_to=None):
         return
 
     message_ids = sorted(row["message_id"] for row in rows)
+    if user.get("blocked_by_admin"):
+        await finish_album(source_uid, ADMIN_ID, group_id, status="failed")
+        await react_status(uid, message_ids[-1], False)
+        await technical(
+            "message.album_delivery_skipped_blocked_user",
+            "WARNING",
+            notify_group=False,
+            alias=user.get("alias"),
+            message_count=len(message_ids),
+        )
+        return
+
     sessions = await db_get(
         "anon_admin_sessions",
         {"sender_user_id": f"eq.{uid}", "select": "*"},
@@ -1147,6 +1269,18 @@ async def deliver_album_to_user(m, uid, reply_to=None):
         return
 
     message_ids = sorted(row["message_id"] for row in rows)
+    user = await get_user(uid)
+    if not user or user.get("blocked_by_admin"):
+        await finish_album(source_uid, uid, group_id, status="failed")
+        await react(ADMIN_ID, message_ids[-1], "👎")
+        await technical(
+            "message.album_delivery_skipped_blocked_user",
+            "WARNING",
+            notify_group=False,
+            message_count=len(message_ids),
+        )
+        return
+
     reply_target = next(
         (row.get("reply_to_message_id") for row in rows
          if row.get("reply_to_message_id")),
@@ -1230,10 +1364,6 @@ async def deliver_album_to_user(m, uid, reply_to=None):
         )
         return
 
-    try:
-        user = await get_user(uid)
-    except Exception:
-        user = None
     await technical(
         "message.admin_album_to_user_sent",
         alias=user.get("alias") if user else None,
@@ -1998,16 +2128,21 @@ async def webhook(request: Request):
 
 @app.on_event("startup")
 async def startup():
+    global _album_recovery_task
     await technical("system.startup_started", notify_group=False)
     if all([BOT_TOKEN, ADMIN_ID, WEBHOOK_SECRET, SUPABASE_URL, SUPABASE_KEY]):
         try:
             await db_get("anon_users", {"select": "telegram_user_id", "limit": "1"})
+            await db_rpc("anon_expire_stale_albums", {
+                "p_lease_seconds": ALBUM_PROCESSING_LEASE_SECONDS,
+            })
             base_url = os.getenv("RENDER_EXTERNAL_URL", "https://anon-mr5s.onrender.com").rstrip("/")
             await tg("setWebhook", {
                 "url": f"{base_url}/telegram/webhook",
                 "secret_token": WEBHOOK_SECRET,
                 "allowed_updates": ["message", "edited_message", "my_chat_member"]
             })
+            _album_recovery_task = asyncio.create_task(album_recovery_loop())
             await technical("system.startup_completed")
         except Exception as exc:
             await technical("system.startup_failed", "ERROR", **exception_fields(exc))
@@ -2023,10 +2158,21 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    global _album_recovery_task
     if BOT_TOKEN and ADMIN_ID:
         try:
             await technical("system.shutdown_started")
         except Exception as exc:
             log.error(make_log_record("system.shutdown_log_failed", "ERROR",
                                       **exception_fields(exc)))
+    tasks = []
+    if _album_recovery_task is not None:
+        _album_recovery_task.cancel()
+        tasks.append(_album_recovery_task)
+        _album_recovery_task = None
+    tasks.extend(list(_album_tasks.values()))
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
     await client.aclose()
