@@ -169,12 +169,83 @@ class AdminRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(main, "get_alias", new=AsyncMock(return_value=user)), \
              patch.object(main, "set_active", new=AsyncMock()) as set_active, \
-             patch.object(main, "technical", new=AsyncMock()), \
-             patch.object(main, "db_get", new=AsyncMock()) as db_get:
-            await main.open_alias("Blue-01", 505)
+             patch.object(main, "set_open", new=AsyncMock()) as set_open, \
+             patch.object(main, "technical", new=AsyncMock()):
+            opened = await main.open_alias("Blue-01", 505)
 
+        self.assertTrue(opened)
         set_active.assert_awaited_once_with(123)
-        db_get.assert_not_awaited()
+        set_open.assert_awaited_once_with(123, True)
+
+    async def test_header_button_style_tracks_persisted_open_state(self):
+        user = {"telegram_user_id": 123, "is_open": False}
+        self.assertEqual(
+            main.header_reply_markup(user)["inline_keyboard"][0][0]["style"],
+            "danger",
+        )
+        user["is_open"] = True
+        self.assertEqual(
+            main.header_reply_markup(user)["inline_keyboard"][0][0]["style"],
+            "success",
+        )
+
+    async def test_open_callback_is_admin_only(self):
+        query = {
+            "id": "callback-1",
+            "from": {"id": 999},
+            "message": {"message_id": 77, "chat": {"id": main.ADMIN_ID}},
+            "data": "anon:open:123",
+        }
+        with patch.object(main, "tg", new=AsyncMock()) as tg, \
+             patch.object(main, "open_alias", new=AsyncMock()) as open_alias:
+            await main.handle_admin_callback(query)
+
+        open_alias.assert_not_awaited()
+        tg.assert_awaited_once_with("answerCallbackQuery", {
+            "callback_query_id": "callback-1",
+            "text": "Not authorized",
+            "show_alert": True,
+        })
+
+    async def test_open_callback_selects_user_and_turns_button_green(self):
+        user = {
+            "telegram_user_id": 123,
+            "alias": "Blue-01",
+            "blocked_by_admin": False,
+            "is_open": False,
+        }
+        query = {
+            "id": "callback-2",
+            "from": {"id": main.ADMIN_ID},
+            "message": {"message_id": 77, "chat": {"id": main.ADMIN_ID}},
+            "data": "anon:open:123",
+        }
+        with patch.object(main, "get_user", new=AsyncMock(return_value=user)), \
+             patch.object(main, "open_alias", new=AsyncMock(return_value=True)) as open_alias, \
+             patch.object(main, "tg", new=AsyncMock()) as tg:
+            await main.handle_admin_callback(query)
+
+        open_alias.assert_awaited_once_with("Blue-01", 77)
+        calls = tg.await_args_list
+        self.assertEqual(calls[0].args[0], "editMessageReplyMarkup")
+        self.assertEqual(
+            calls[0].args[1]["reply_markup"]["inline_keyboard"][0][0]["style"],
+            "success",
+        )
+        self.assertEqual(calls[1].args[0], "answerCallbackQuery")
+
+    async def test_close_command_persists_closed_state_for_active_alias(self):
+        message = {"message_id": 78, "text": "/c"}
+        with patch.object(main, "admin_state", new=AsyncMock(
+            return_value={"active_user_id": 123}
+        )), patch.object(main, "set_open", new=AsyncMock()) as set_open, \
+             patch.object(main, "set_active", new=AsyncMock()) as set_active, \
+             patch.object(main, "technical", new=AsyncMock()):
+            handled = await main.admin_command(message)
+
+        self.assertTrue(handled)
+        set_open.assert_awaited_once_with(123, False)
+        set_active.assert_awaited_once_with(None)
 
 
 
