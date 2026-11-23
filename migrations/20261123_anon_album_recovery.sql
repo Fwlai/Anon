@@ -6,6 +6,15 @@ SET status = 'delivered_unmapped'
 WHERE status = 'processing'
   AND claimed_at IS NULL;
 
+CREATE INDEX IF NOT EXISTS anon_album_buffer_sender_user_id_idx
+  ON public.anon_album_buffer (sender_user_id);
+
+CREATE INDEX IF NOT EXISTS anon_album_routes_recipient_user_id_idx
+  ON public.anon_album_routes (recipient_user_id);
+
+CREATE INDEX IF NOT EXISTS anon_message_map_sender_user_id_idx
+  ON public.anon_message_map (sender_user_id);
+
 CREATE INDEX IF NOT EXISTS anon_album_buffer_processing_claim_idx
   ON public.anon_album_buffer (claimed_at)
   WHERE status = 'processing';
