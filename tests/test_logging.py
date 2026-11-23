@@ -56,6 +56,10 @@ class RenderWebhookVerificationTests(unittest.TestCase):
 
 
 class StructuredLogTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        main._notify_state.clear()
+        main._stats.update({"errors": 0, "warnings": 0, "last_error": None})
+
     def test_log_record_is_json_serializable(self):
         record = main.make_log_record("test.event", "WARNING", count=3)
         decoded = json.loads(json.dumps(record))
@@ -63,82 +67,81 @@ class StructuredLogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decoded["level"], "WARNING")
         self.assertEqual(decoded["details"]["count"], 3)
 
-    async def test_technical_sends_only_one_rich_message(self):
+    async def test_important_event_sends_one_compact_group_message(self):
         with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)), \
              patch.object(main, "tg", new=AsyncMock(return_value={"message_id": 1})) as tg_mock, \
              patch.object(main, "write_log_record"):
-            await main.technical("test.event", "INFO", sample="value")
+            await main.technical("system.startup_completed", "INFO", stage="ready")
+
         tg_mock.assert_awaited_once()
-        self.assertEqual(tg_mock.await_args.args[0], "sendRichMessage")
-        self.assertIn("rich_message", tg_mock.await_args.args[1])
-        self.assertNotIn("entities", tg_mock.await_args.args[1])
-        markdown = tg_mock.await_args.args[1]["rich_message"]["markdown"]
-        self.assertTrue(markdown.startswith(
-            "<details><summary><code>test.event</code></summary>\n\n```json\n"
-        ))
-        self.assertTrue(markdown.endswith("\n```\n</details>"))
-        self.assertNotIn("Anon Log", markdown)
-        self.assertNotIn("**INFO**", markdown)
+        method, payload = tg_mock.await_args.args
+        self.assertEqual(method, "sendMessage")
+        self.assertEqual(payload["chat_id"], 12345)
+        self.assertIn("system.startup_completed", payload["text"])
+        self.assertNotIn("rich_message", payload)
 
-    async def test_event_heading_cannot_inject_markdown_or_new_lines(self):
-        with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)), \
-             patch.object(main, "tg", new=AsyncMock(return_value={"message_id": 1})) as tg_mock, \
+    async def test_unselected_info_and_warning_events_do_not_reach_log_group(self):
+        with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)) as log_id, \
+             patch.object(main, "tg", new=AsyncMock()) as tg_mock, \
              patch.object(main, "write_log_record"):
-            await main.technical("bad`event\n```json", "WARNING")
+            await main.technical("ordinary.info", "INFO")
+            await main.technical("ordinary.warning", "WARNING")
 
-        markdown = tg_mock.await_args.args[1]["rich_message"]["markdown"]
-        self.assertEqual(markdown.count("```"), 2)
-        self.assertTrue(markdown.startswith(
-            "<details><summary><code>bad_event____json</code></summary>"
-        ))
-        self.assertTrue(markdown.endswith("\n```\n</details>"))
+        log_id.assert_not_awaited()
+        tg_mock.assert_not_awaited()
 
-    async def test_json_code_fence_inside_detail_does_not_break_markdown(self):
-        original = {"snippet": "before ```json\nafter"}
-        with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)), \
-             patch.object(main, "tg", new=AsyncMock(return_value={"message_id": 1})) as tg_mock, \
-             patch.object(main, "write_log_record"):
-            await main.technical("test.event", "ERROR", payload=original)
+    def test_event_heading_cannot_inject_markdown_or_new_lines(self):
+        record = main.make_log_record("bad\`event\n\`\`\`json", "WARNING")
+        rendered = main.group_log_message(record)
+        heading = rendered.splitlines()[0]
+        self.assertNotIn("`", heading)
+        self.assertNotIn("\\n", heading)
+        self.assertRegex(heading, r"^WARNING · [A-Za-z0-9_.:-]+$")
 
-        markdown = tg_mock.await_args.args[1]["rich_message"]["markdown"]
-        self.assertEqual(markdown.count("```"), 2)
-        json_text = markdown.split("```json\n", 1)[1].rsplit("\n```\n</details>", 1)[0]
-        record = json.loads(json_text)
-        self.assertEqual(record["details"]["payload"], original)
+    def test_only_allowlisted_metadata_is_in_group_log(self):
+        record = main.make_log_record(
+            "test.event",
+            "ERROR",
+            alias="Blue-01",
+            user_id=123456789,
+            message_id=555,
+            direction="user_to_admin",
+            message="private body must not appear",
+            error="telegram temporary failure",
+        )
+        rendered = main.group_log_message(record)
+        self.assertIn("direction: user_to_admin", rendered)
+        self.assertIn("error: telegram temporary failure", rendered)
+        self.assertNotIn("Blue-01", rendered)
+        self.assertNotIn("123456789", rendered)
+        self.assertNotIn("555", rendered)
+        self.assertNotIn("private body must not appear", rendered)
 
-    async def test_oversized_log_is_truncated_before_rich_message_send(self):
-        with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)), \
-             patch.object(main, "tg", new=AsyncMock(return_value={"message_id": 1})) as tg_mock, \
-             patch.object(main, "write_log_record"):
-            await main.technical("test.large", "ERROR", huge_value="x" * 5000)
-
-        markdown = tg_mock.await_args.args[1]["rich_message"]["markdown"]
-        json_text = markdown.split("```json\n", 1)[1].rsplit("\n```\n</details>", 1)[0]
-        record = json.loads(json_text)
-        self.assertTrue(record["details"]["truncated"])
-        self.assertEqual(record["details"]["available_fields"], ["huge_value"])
-        self.assertLess(main.utf16_length(markdown), 3100)
+    def test_oversized_log_is_truncated(self):
+        record = main.make_log_record("test.large", "ERROR", error="x" * 5000)
+        rendered = main.group_log_message(record)
+        self.assertLessEqual(len(rendered), 900)
 
     async def test_missing_log_group_skips_telegram_delivery(self):
         with patch.object(main, "log_chat_id", new=AsyncMock(return_value=None)), \
              patch.object(main, "tg", new=AsyncMock()) as tg_mock, \
              patch.object(main, "write_log_record"):
-            record = await main.technical("test.no_group")
+            record = await main.technical("system.startup_completed")
 
-        self.assertEqual(record["event"], "test.no_group")
+        self.assertEqual(record["event"], "system.startup_completed")
         tg_mock.assert_not_awaited()
 
-    async def test_rich_message_failure_does_not_fallback_to_send_message(self):
+    async def test_telegram_log_delivery_failure_is_not_retried_through_fallback(self):
         failure = main.IntegrationError(
-            "telegram", "sendRichMessage", transport_error="ReadTimeout"
+            "telegram", "sendMessage", transport_error="ReadTimeout"
         )
         with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)), \
              patch.object(main, "tg", new=AsyncMock(side_effect=failure)) as tg_mock, \
              patch.object(main, "write_log_record") as write_log:
-            await main.technical("test.delivery_failure")
+            await main.technical("system.startup_completed")
 
         tg_mock.assert_awaited_once()
-        self.assertEqual(tg_mock.await_args.args[0], "sendRichMessage")
+        self.assertEqual(tg_mock.await_args.args[0], "sendMessage")
         self.assertEqual(write_log.call_count, 2)
 
     def test_render_private_fields_are_removed(self):
