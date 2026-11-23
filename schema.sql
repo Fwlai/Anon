@@ -1,6 +1,7 @@
 create table if not exists public.anon_users (
   telegram_user_id bigint primary key,
   alias text not null unique,
+  is_open boolean not null default false,
   created_at timestamptz not null default now(),
   blocked_admin boolean not null default false,
   blocked_by_admin boolean not null default false,
