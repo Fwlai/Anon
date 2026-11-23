@@ -12,8 +12,6 @@ BEGIN
      'processing', now() - interval '10 minutes', now() - interval '10 minutes'),
     (123, -1004323044570, 123, 'user_to_admin', 'recovery-stale', 802,
      'processing', now() - interval '10 minutes', now() - interval '10 minutes'),
-    (123, -1004323044570, 123, 'user_to_admin', 'recovery-legacy', 805,
-     'processing', now() - interval '10 minutes', NULL),
     (123, -1004323044570, 123, 'user_to_admin', 'recovery-fresh', 803,
      'processing', now(), now()),
     (123, -1004323044570, 123, 'user_to_admin', 'recovery-pending', 804,
@@ -22,16 +20,24 @@ BEGIN
   SELECT public.anon_expire_stale_albums(300)
     INTO v_expired;
 
-  IF v_expired <> 3 THEN
-    RAISE EXCEPTION 'expected 3 stale or legacy album parts to expire, got %', v_expired;
+  IF v_expired <> 2 THEN
+    RAISE EXCEPTION 'expected 2 stale claimed album parts to expire, got %', v_expired;
   END IF;
 
   IF EXISTS (
     SELECT 1 FROM public.anon_album_buffer
-    WHERE media_group_id IN ('recovery-stale', 'recovery-legacy')
+    WHERE media_group_id = 'recovery-stale'
       AND status <> 'delivered_unmapped'
   ) THEN
-    RAISE EXCEPTION 'stale or legacy processing album was not marked delivered_unmapped';
+    RAISE EXCEPTION 'stale claimed album was not marked delivered_unmapped';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM public.anon_album_buffer
+    WHERE media_group_id = 'recovery-legacy-migration'
+      AND status <> 'delivered_unmapped'
+  ) THEN
+    RAISE EXCEPTION 'legacy processing album was not migrated to delivered_unmapped';
   END IF;
 
   IF EXISTS (
