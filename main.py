@@ -52,6 +52,51 @@ UPDATE_ID = ContextVar("update_id", default=None)
 RETENTION_CLEANUP_INTERVAL = 6 * 60 * 60
 _last_retention_cleanup = 0.0
 _retention_cleanup_lock = asyncio.Lock()
+_STARTED_AT = time.time()
+
+ALBUM_QUIET_SECONDS = 3
+ALBUM_MAX_WAIT_SECONDS = 45
+ALBUM_PROCESSING_LEASE_SECONDS = 300
+ALBUM_RECOVERY_INTERVAL_SECONDS = 5
+_album_tasks = {}
+_album_recovery_task = None
+
+NOTIFY_COOLDOWN_SECONDS = 300
+IMPORTANT_EVENTS = {
+    "system.startup_completed",
+    "system.startup_failed",
+    "system.shutdown_started",
+    "user.registered",
+    "admin.user_blocked",
+    "admin.user_unblocked",
+}
+NOTIFY_WARNING_EVENTS = {
+    "message.album_late_part_rejected",
+    "message.album_stale_processing_marked_unknown",
+    "maintenance.retention_cleanup_failed",
+    "telegram.unregistered_group_leave_failed",
+}
+GROUP_LOG_FIELDS = {
+    "provider", "operation", "http_status", "error_code", "exception_type",
+    "transport_error", "error", "message", "stage", "direction", "message_count",
+    "item_count", "retry_after_seconds",
+}
+_notify_state = {}
+_stats = {"errors": 0, "warnings": 0, "last_error": None}
+SENSITIVE_KEYS = {
+    "alias", "sender_user_id", "recipient_user_id", "user_id", "telegram_user_id",
+    "chat_id", "source_chat_id", "destination_chat_id", "admin_user_id",
+    "active_user_id", "update_id", "telegram_update_id", "from_id", "uid",
+    "message_id", "admin_message_id", "user_message_id", "source_message_id",
+    "destination_message_id", "recipient_message_id", "source_message_ids",
+    "destination_message_ids", "service", "repo", "branch", "commit", "url",
+    "environment", "render", "request_id", "project", "project_name",
+    "project_id", "projectname", "projectid", "service_name", "service_id",
+    "servicename", "serviceid", "deployment_id", "deploymentid", "deploy_id",
+    "deployid", "instance_id", "instanceid", "region", "platform", "hostname",
+    "host", "render_service_id", "render_instance_id", "render_deploy_id",
+    "event_id", "eventid",
+}
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
@@ -123,6 +168,17 @@ def telegram_error_code(exc):
 
 def telegram_rate_limited(exc):
     return telegram_error_code(exc) == 429
+
+
+def telegram_retry_delay(exc, attempt):
+    suggested = (
+        exc.details.get("retry_after_seconds")
+        if isinstance(exc, IntegrationError) and exc.provider == "telegram"
+        else None
+    )
+    if isinstance(suggested, int) and not isinstance(suggested, bool) and suggested > 0:
+        return suggested
+    return 2 + attempt * 2
 
 
 def telegram_permanent_rejection(exc):
@@ -381,10 +437,18 @@ async def tg(method, payload):
         raise IntegrationError("telegram", method, http_status=r.status_code,
                                error="invalid_json_response") from None
     if r.status_code >= 400 or not data.get("ok"):
-        raise IntegrationError("telegram", method, http_status=r.status_code,
-                               error_code=data.get("error_code"),
-                               error=safe_error_message(data.get("description")))
+        details = {
+            "http_status": r.status_code,
+            "error_code": data.get("error_code"),
+            "error": safe_error_message(data.get("description")),
+        }
+        parameters = data.get("parameters")
+        retry_after = parameters.get("retry_after") if isinstance(parameters, dict) else None
+        if isinstance(retry_after, int) and not isinstance(retry_after, bool) and retry_after > 0:
+            details["retry_after_seconds"] = retry_after
+        raise IntegrationError("telegram", method, **details)
     return data.get("result")
+
 
 async def get_user(uid):
     rows = await db_get("anon_users", {"telegram_user_id": f"eq.{uid}", "select": "*"})
@@ -476,6 +540,14 @@ def kind_of(m):
     if m.get("game"): return "game"
     if m.get("invoice"): return "invoice"
     return "text"
+
+def header_text(alias):
+    return f'<blockquote>Alias: <code>{html.escape(alias)}</code></blockquote>'
+
+
+def reply_params(message_id):
+    return {"message_id": message_id, "allow_sending_without_reply": True}
+
 
 async def map_outbound(user_mid,uid,admin_mid):
     await db_post("anon_outbound_map",{"user_message_id":user_mid,"sender_user_id":uid,"admin_message_id":admin_mid},"resolution=ignore-duplicates,return=minimal")
@@ -597,7 +669,19 @@ async def edit_incoming_copy(m):
         if not telegram_permanent_rejection(exc):
             raise
 
-async def claim_album_messages(m, sender_uid, destination_uid, direction, reply_to=None):
+async def copy_album(source_uid, destination_uid, group_id, message_ids, reply_target):
+    """Copy source messages as an album, preserving order and reply context."""
+    payload = {
+        "chat_id": destination_uid,
+        "from_chat_id": source_uid,
+        "message_ids": message_ids,
+    }
+    if reply_target:
+        payload["reply_parameters"] = reply_params(reply_target)
+    return await tg("copyMessages", payload)
+
+async def buffer_album_message(m, sender_uid, destination_uid, direction, reply_to=None):
+    """Fast path: store one album part. Returns (source, group, accepted)."""
     source_uid = ADMIN_ID if direction == "admin_to_user" else sender_uid
     group_id = str(m["media_group_id"])
     group_filter = {
@@ -615,12 +699,11 @@ async def claim_album_messages(m, sender_uid, destination_uid, direction, reply_
             "message.album_late_part_rejected",
             "WARNING",
             direction=direction,
-            sender_user_id=sender_uid,
             media_group_id=group_id,
             message_id=m["message_id"],
             existing_states=sorted({row["status"] for row in existing}),
         )
-        return source_uid, group_id, []
+        return source_uid, group_id, False
 
     now = datetime.now(timezone.utc).isoformat()
     params = {
@@ -651,14 +734,20 @@ async def claim_album_messages(m, sender_uid, destination_uid, direction, reply_
         },
         {"last_seen_at": now},
     )
+    return source_uid, group_id, True
 
-    for delay in (1.2, 0.5, 0.5, 0.5):
-        await asyncio.sleep(delay)
+
+async def claim_album_messages(m, sender_uid, destination_uid, direction, reply_to=None):
+    source_uid = ADMIN_ID if direction == "admin_to_user" else sender_uid
+    group_id = str(m["media_group_id"])
+    await asyncio.sleep(ALBUM_QUIET_SECONDS + 0.3)
+    deadline = time.monotonic() + ALBUM_MAX_WAIT_SECONDS
+    while True:
         rows = await db_rpc("anon_claim_album", {
             "p_source_chat_id": source_uid,
             "p_destination_chat_id": destination_uid,
             "p_media_group_id": group_id,
-            "p_quiet_seconds": 1,
+            "p_quiet_seconds": ALBUM_QUIET_SECONDS,
         })
         if rows:
             if any(
@@ -674,7 +763,17 @@ async def claim_album_messages(m, sender_uid, destination_uid, direction, reply_
                 })
                 raise RuntimeError("Album buffer contains inconsistent routing data")
             return source_uid, group_id, rows
-    return source_uid, group_id, []
+        pending = await db_get("anon_album_buffer", {
+            "source_chat_id": f"eq.{source_uid}",
+            "destination_chat_id": f"eq.{destination_uid}",
+            "media_group_id": f"eq.{group_id}",
+            "status": "eq.pending",
+            "select": "message_id",
+            "limit": "1",
+        })
+        if not pending or time.monotonic() >= deadline:
+            return source_uid, group_id, []
+        await asyncio.sleep(1)
 
 
 async def finish_album(source_uid, destination_uid, group_id, mappings=None, status="delivered"):
@@ -687,7 +786,168 @@ async def finish_album(source_uid, destination_uid, group_id, mappings=None, sta
     })
 
 
+async def run_album_worker(key, factory):
+    try:
+        for attempt in range(4):
+            try:
+                await factory()
+                return
+            except Exception as exc:
+                if telegram_rate_limited(exc) and attempt < 3:
+                    await asyncio.sleep(telegram_retry_delay(exc, attempt))
+                    continue
+                await technical("message.album_delivery_failed", "ERROR",
+                                **exception_fields(exc))
+                return
+    finally:
+        _album_tasks.pop(key, None)
+
+
+def start_album_worker(key, factory):
+    task = _album_tasks.get(key)
+    if task is not None and not task.done():
+        return
+    _album_tasks[key] = asyncio.create_task(run_album_worker(key, factory))
+
+
+async def recover_pending_albums_once():
+    """Recreate workers for quiet, durable album groups after process restarts."""
+    expired_items = await db_rpc("anon_expire_stale_albums", {
+        "p_lease_seconds": ALBUM_PROCESSING_LEASE_SECONDS,
+    })
+    if isinstance(expired_items, int) and expired_items:
+        await technical(
+            "message.album_stale_processing_marked_unknown",
+            "ERROR",
+            notify_group=False,
+            item_count=expired_items,
+        )
+
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(seconds=ALBUM_QUIET_SECONDS)
+    ).isoformat()
+    rows = await db_get("anon_album_buffer", {
+        "status": "eq.pending",
+        "last_seen_at": f"lt.{cutoff}",
+        "select": (
+            "source_chat_id,destination_chat_id,sender_user_id,direction,"
+            "media_group_id,message_id"
+        ),
+        "order": "created_at.asc",
+        "limit": "500",
+    })
+
+    groups = {}
+    for row in rows:
+        key = (
+            row["source_chat_id"],
+            row["destination_chat_id"],
+            str(row["media_group_id"]),
+        )
+        groups.setdefault(key, []).append(row)
+
+    started = 0
+    for (source_uid, destination_uid, group_id), items in groups.items():
+        direction = items[0]["direction"]
+        sender_uid = items[0]["sender_user_id"]
+        message = {
+            "message_id": max(item["message_id"] for item in items),
+            "media_group_id": group_id,
+            "from": {"id": sender_uid},
+        }
+        worker_key = (direction, source_uid, destination_uid, group_id)
+        current = _album_tasks.get(worker_key)
+        if current is not None and not current.done():
+            continue
+
+        if direction == "user_to_admin":
+            user = await get_user(sender_uid)
+            if not user:
+                await technical(
+                    "message.album_recovery_user_missing",
+                    "ERROR",
+                    notify_group=False,
+                    message_count=len(items),
+                )
+                continue
+            start_album_worker(
+                worker_key,
+                lambda m=message, u=user: deliver_album_to_admin(m, u),
+            )
+        elif direction == "admin_to_user":
+            start_album_worker(
+                worker_key,
+                lambda m=message, uid=destination_uid: deliver_album_to_user(m, uid),
+            )
+        else:
+            await technical(
+                "message.album_recovery_invalid_direction",
+                "ERROR",
+                notify_group=False,
+            )
+            continue
+        started += 1
+
+    return started
+
+
+async def album_recovery_loop():
+    while True:
+        try:
+            await recover_pending_albums_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await technical(
+                "message.album_recovery_scan_failed",
+                "WARNING",
+                notify_group=False,
+                **exception_fields(exc),
+            )
+        await asyncio.sleep(ALBUM_RECOVERY_INTERVAL_SECONDS)
+
+
 async def relay_album_to_admin(m, user, reply_to=None):
+    """Webhook-facing: buffer this part and return immediately."""
+    uid = m["from"]["id"]
+    source_uid, group_id, accepted = await buffer_album_message(
+        m, uid, ADMIN_ID, "user_to_admin", reply_to
+    )
+    if accepted:
+        start_album_worker(
+            ("user_to_admin", source_uid, ADMIN_ID, group_id),
+            lambda: deliver_album_to_admin(m, user, reply_to),
+        )
+
+
+async def relay_album_to_user(m, uid, reply_to=None):
+    """Webhook-facing: buffer this part and return immediately."""
+    source_uid, group_id, accepted = await buffer_album_message(
+        m, uid, uid, "admin_to_user", reply_to
+    )
+    if accepted:
+        start_album_worker(
+            ("admin_to_user", source_uid, uid, group_id),
+            lambda: deliver_album_to_user(m, uid, reply_to),
+        )
+
+
+async def release_album_before_delivery(source_uid, destination_uid, group_id, stage):
+    try:
+        await finish_album(
+            source_uid, destination_uid, group_id, status="pending"
+        )
+    except Exception as exc:
+        await technical(
+            "message.album_pre_delivery_retry_state_failed",
+            "ERROR",
+            notify_group=False,
+            stage=stage,
+            **exception_fields(exc),
+        )
+
+
+async def deliver_album_to_admin(m, user, reply_to=None):
     uid = m["from"]["id"]
     source_uid, group_id, rows = await claim_album_messages(
         m, uid, ADMIN_ID, "user_to_admin", reply_to
@@ -696,10 +956,28 @@ async def relay_album_to_admin(m, user, reply_to=None):
         return
 
     message_ids = sorted(row["message_id"] for row in rows)
-    sessions = await db_get(
-        "anon_admin_sessions",
-        {"sender_user_id": f"eq.{uid}", "select": "*"},
-    )
+    if user.get("blocked_by_admin"):
+        await finish_album(source_uid, ADMIN_ID, group_id, status="failed")
+        await react_status(uid, message_ids[-1], False)
+        await technical(
+            "message.album_delivery_skipped_blocked_user",
+            "WARNING",
+            notify_group=False,
+            alias=user.get("alias"),
+            message_count=len(message_ids),
+        )
+        return
+
+    try:
+        sessions = await db_get(
+            "anon_admin_sessions",
+            {"sender_user_id": f"eq.{uid}", "select": "*"},
+        )
+    except Exception:
+        await release_album_before_delivery(
+            source_uid, ADMIN_ID, group_id, "admin_session_lookup"
+        )
+        raise
     now = datetime.now(timezone.utc)
     header = not sessions
     if sessions:
@@ -712,7 +990,7 @@ async def relay_album_to_admin(m, user, reply_to=None):
         try:
             sent_header = await tg("sendMessage", {
                 "chat_id": ADMIN_ID,
-                "text": f'<blockquote>Chat: <code>{html.escape(user["alias"])}</code></blockquote>',
+                "text": header_text(user["alias"]),
                 "parse_mode": "HTML",
             })
         except Exception as exc:
@@ -770,21 +1048,14 @@ async def relay_album_to_admin(m, user, reply_to=None):
             sender_user_id=uid,
         )
 
-    copy_payload = {
-        "chat_id": ADMIN_ID,
-        "from_chat_id": source_uid,
-        "message_ids": message_ids,
-    }
     reply_target = next(
         (row.get("reply_to_message_id") for row in rows
          if row.get("reply_to_message_id")),
         None,
     )
-    if reply_target:
-        copy_payload["reply_parameters"] = {"message_id": reply_target}
 
     try:
-        copied = await tg("copyMessages", copy_payload)
+        copied = await copy_album(source_uid, ADMIN_ID, group_id, message_ids, reply_target)
     except Exception as exc:
         if telegram_rate_limited(exc):
             try:
@@ -884,7 +1155,7 @@ async def relay_album_to_admin(m, user, reply_to=None):
     )
 
 
-async def relay_album_to_user(m, uid, reply_to=None):
+async def deliver_album_to_user(m, uid, reply_to=None):
     source_uid, group_id, rows = await claim_album_messages(
         m, uid, uid, "admin_to_user", reply_to
     )
@@ -892,21 +1163,32 @@ async def relay_album_to_user(m, uid, reply_to=None):
         return
 
     message_ids = sorted(row["message_id"] for row in rows)
-    copy_payload = {
-        "chat_id": uid,
-        "from_chat_id": source_uid,
-        "message_ids": message_ids,
-    }
+    try:
+        user = await get_user(uid)
+    except Exception:
+        await release_album_before_delivery(
+            source_uid, uid, group_id, "recipient_lookup"
+        )
+        raise
+    if not user or user.get("blocked_by_admin"):
+        await finish_album(source_uid, uid, group_id, status="failed")
+        await react(ADMIN_ID, message_ids[-1], "👎")
+        await technical(
+            "message.album_delivery_skipped_blocked_user",
+            "WARNING",
+            notify_group=False,
+            message_count=len(message_ids),
+        )
+        return
+
     reply_target = next(
         (row.get("reply_to_message_id") for row in rows
          if row.get("reply_to_message_id")),
         None,
     )
-    if reply_target:
-        copy_payload["reply_parameters"] = {"message_id": reply_target}
 
     try:
-        copied = await tg("copyMessages", copy_payload)
+        copied = await copy_album(source_uid, uid, group_id, message_ids, reply_target)
     except Exception as exc:
         if telegram_rate_limited(exc):
             try:
@@ -914,7 +1196,7 @@ async def relay_album_to_user(m, uid, reply_to=None):
             except Exception as persist_exc:
                 await technical(
                     "message.album_retry_state_failed", "ERROR",
-                    direction="admin_to_user", recipient_user_id=uid,
+                    direction="admin_to_user",
                     **exception_fields(persist_exc),
                 )
             raise
@@ -929,7 +1211,7 @@ async def relay_album_to_user(m, uid, reply_to=None):
         except Exception as persist_exc:
             await technical(
                 "message.album_terminal_state_persistence_failed", "ERROR",
-                direction="admin_to_user", recipient_user_id=uid,
+                direction="admin_to_user",
                 terminal_status=terminal_status,
                 **exception_fields(persist_exc),
             )
@@ -939,7 +1221,6 @@ async def relay_album_to_user(m, uid, reply_to=None):
             else "message.album_delivery_outcome_unknown",
             "ERROR",
             direction="admin_to_user",
-            recipient_user_id=uid,
             automatic_retry_suppressed=True,
             **exception_fields(exc),
         )
@@ -953,13 +1234,12 @@ async def relay_album_to_user(m, uid, reply_to=None):
                 "message.album_unmapped_state_persistence_failed",
                 "ERROR",
                 direction="admin_to_user",
-                recipient_user_id=uid,
                 delivery_result_received=True,
                 **exception_fields(exc),
             )
         await technical(
             "message.album_copy_incomplete", "ERROR",
-            direction="admin_to_user", recipient_user_id=uid,
+            direction="admin_to_user",
             source_message_count=len(message_ids),
             copied_message_count=len(copied) if isinstance(copied, list) else None,
             delivery_already_attempted=True,
@@ -978,16 +1258,12 @@ async def relay_album_to_user(m, uid, reply_to=None):
     except Exception as exc:
         await technical(
             "message.album_mapping_persistence_failed", "ERROR",
-            direction="admin_to_user", recipient_user_id=uid,
+            direction="admin_to_user",
             message_count=len(message_ids), delivery_already_completed=True,
             **exception_fields(exc),
         )
         return
 
-    try:
-        user = await get_user(uid)
-    except Exception:
-        user = None
     await technical(
         "message.admin_album_to_user_sent",
         alias=user.get("alias") if user else None,
