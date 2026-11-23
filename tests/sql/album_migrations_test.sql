@@ -314,5 +314,29 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'album retention index is missing';
   END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND indexname = 'anon_album_buffer_sender_user_id_idx'
+  ) THEN
+    RAISE EXCEPTION 'album buffer sender foreign-key index is missing';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND indexname = 'anon_album_routes_recipient_user_id_idx'
+  ) THEN
+    RAISE EXCEPTION 'album routes recipient foreign-key index is missing';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND indexname = 'anon_message_map_sender_user_id_idx'
+  ) THEN
+    RAISE EXCEPTION 'message map sender foreign-key index is missing';
+  END IF;
+
 END
-$$;
+$;
