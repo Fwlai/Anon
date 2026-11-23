@@ -273,6 +273,58 @@ class ContentCopyTests(unittest.IsolatedAsyncioTestCase):
         state.assert_not_awaited()
 
 
+    async def test_admin_album_persists_reply_found_on_a_later_album_part(self):
+        message = {
+            "message_id": 510,
+            "from": {"id": main.ADMIN_ID},
+            "media_group_id": "admin-album-late-reply",
+            "reply_to_message": {"message_id": 700},
+            "photo": [{}],
+        }
+        route = [{
+            "recipient_user_id": 123,
+            "reply_to_message_id": None,
+        }]
+
+        with (
+            patch.object(main, "db_get", new=AsyncMock(return_value=route)),
+            patch.object(
+                main, "mapped_admin_reply_target_for_user",
+                new=AsyncMock(return_value=203),
+            ),
+            patch.object(main, "db_patch", new=AsyncMock()) as db_patch,
+            patch.object(main, "db_rpc", new=AsyncMock(return_value=[{
+                "recipient_user_id": 123,
+                "reply_to_message_id": 203,
+            }])) as db_rpc,
+            patch.object(main, "get_user", new=AsyncMock(return_value={
+                "telegram_user_id": 123,
+                "alias": "Blue-01",
+                "blocked_by_admin": False,
+            })),
+            patch.object(main, "send_to_user", new=AsyncMock()) as send,
+        ):
+            await main.route_admin(message)
+
+        db_patch.assert_awaited_once_with(
+            "anon_album_routes",
+            {
+                "source_chat_id": f"eq.{main.ADMIN_ID}",
+                "media_group_id": "eq.admin-album-late-reply",
+                "recipient_user_id": "eq.123",
+                "reply_to_message_id": "is.null",
+            },
+            {"reply_to_message_id": 203},
+        )
+        db_rpc.assert_awaited_once_with("anon_reserve_admin_album_route", {
+            "p_source_chat_id": main.ADMIN_ID,
+            "p_media_group_id": "admin-album-late-reply",
+            "p_candidate_user_id": 123,
+            "p_reply_to_message_id": 203,
+        })
+        send.assert_awaited_once_with(message, 123, 203)
+
+
     async def test_album_route_reservation_keeps_atomic_recipient(self):
         message = {
             "message_id": 508,
