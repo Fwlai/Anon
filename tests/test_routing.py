@@ -179,11 +179,14 @@ class AdminRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(opened)
         set_active.assert_awaited_once_with(123)
-        self.assertEqual(set_open.await_args_list, [
-            unittest.mock.call(456, False),
-            unittest.mock.call(123, True),
-        ])
-        refresh.assert_awaited_once_with(456, False, None)
+        self.assertEqual(
+            [call.args for call in set_open.await_args_list],
+            [(456, False), (123, True)],
+        )
+        self.assertEqual(
+            [call.args for call in refresh.await_args_list],
+            [(456, False, None), (123, True, None)],
+        )
 
     async def test_header_button_style_tracks_persisted_open_state(self):
         user = {"telegram_user_id": 123, "is_open": False}
