@@ -9,6 +9,7 @@ create table if not exists public.anon_users (
   start_reacted boolean not null default false
 );
 alter table public.anon_users add column if not exists start_reacted boolean not null default false;
+alter table public.anon_users add column if not exists is_open boolean not null default false;
 
 create table if not exists public.anon_message_map (
   admin_message_id bigint primary key,
