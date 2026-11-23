@@ -153,6 +153,17 @@ def telegram_rate_limited(exc):
     return telegram_error_code(exc) == 429
 
 
+def telegram_retry_delay(exc, attempt):
+    suggested = (
+        exc.details.get("retry_after_seconds")
+        if isinstance(exc, IntegrationError) and exc.provider == "telegram"
+        else None
+    )
+    if isinstance(suggested, int) and not isinstance(suggested, bool) and suggested > 0:
+        return suggested
+    return 2 + attempt * 2
+
+
 def telegram_permanent_rejection(exc):
     code = telegram_error_code(exc)
     return code is not None and 400 <= code < 500 and code != 429
@@ -407,9 +418,16 @@ async def tg(method, payload):
         raise IntegrationError("telegram", method, http_status=r.status_code,
                                error="invalid_json_response") from None
     if r.status_code >= 400 or not data.get("ok"):
-        raise IntegrationError("telegram", method, http_status=r.status_code,
-                               error_code=data.get("error_code"),
-                               error=safe_error_message(data.get("description")))
+        details = {
+            "http_status": r.status_code,
+            "error_code": data.get("error_code"),
+            "error": safe_error_message(data.get("description")),
+        }
+        parameters = data.get("parameters")
+        retry_after = parameters.get("retry_after") if isinstance(parameters, dict) else None
+        if isinstance(retry_after, int) and not isinstance(retry_after, bool) and retry_after > 0:
+            details["retry_after_seconds"] = retry_after
+        raise IntegrationError("telegram", method, **details)
     return data.get("result")
 
 async def get_user(uid):
@@ -920,7 +938,7 @@ async def run_album_worker(key, factory):
                 return
             except Exception as exc:
                 if telegram_rate_limited(exc) and attempt < 3:
-                    await asyncio.sleep(2 + attempt * 2)
+                    await asyncio.sleep(telegram_retry_delay(exc, attempt))
                     continue
                 await technical("message.album_delivery_failed", "ERROR",
                                 **exception_fields(exc))
