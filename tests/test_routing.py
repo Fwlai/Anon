@@ -221,7 +221,7 @@ class AdminRoutingTests(unittest.IsolatedAsyncioTestCase):
             "show_alert": True,
         })
 
-    async def test_rich_button_opens_alias_without_editing_old_report(self):
+    async def test_rich_button_opens_alias_and_edits_only_touched_report(self):
         user = {
             "telegram_user_id": 123,
             "alias": "Blue-01",
@@ -245,10 +245,37 @@ class AdminRoutingTests(unittest.IsolatedAsyncioTestCase):
             await main.handle_admin_callback(query)
 
         open_alias.assert_awaited_once_with("Blue-01", 77)
-        tg.assert_awaited_once_with("answerCallbackQuery", {
+        self.assertEqual(tg.await_args_list[0].args[0], "editMessageText")
+        self.assertEqual(tg.await_args_list[0].args[1], {
+            "chat_id": main.ADMIN_ID,
+            "message_id": 77,
+            "rich_message": main.header_rich_message("Blue-01", 123, True),
+        })
+        self.assertEqual(tg.await_args_list[1].args[0], "answerCallbackQuery")
+        self.assertEqual(tg.await_args_list[1].args[1], {
             "callback_query_id": "callback-2",
             "text": "Chat opened",
         })
+
+    async def test_opening_with_i_does_not_edit_any_old_report_button(self):
+        user = {
+            "telegram_user_id": 123,
+            "alias": "Blue-01",
+            "blocked_by_admin": False,
+        }
+        with (
+            patch.object(main, "get_alias", new=AsyncMock(return_value=user)),
+            patch.object(main, "admin_state", new=AsyncMock(return_value={
+                "active_user_id": None
+            })),
+            patch.object(main, "set_active", new=AsyncMock()),
+            patch.object(main, "set_open", new=AsyncMock()),
+            patch.object(main, "technical", new=AsyncMock()),
+            patch.object(main, "tg", new=AsyncMock()) as tg,
+        ):
+            await main.admin_command({"text": "/i Blue-01", "message_id": 91})
+
+        tg.assert_not_awaited()
 
     async def test_close_command_closes_only_the_active_alias(self):
         message = {"message_id": 78, "text": "/c"}
@@ -266,7 +293,7 @@ class AdminRoutingTests(unittest.IsolatedAsyncioTestCase):
         set_open.assert_awaited_once_with(123, False)
         set_active.assert_awaited_once_with(None)
 
-    async def test_rich_button_closes_active_alias_without_editing_report(self):
+    async def test_rich_button_closes_alias_and_edits_only_touched_report(self):
         user = {
             "telegram_user_id": 123,
             "alias": "Blue-01",
@@ -292,7 +319,14 @@ class AdminRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         set_active.assert_awaited_once_with(None)
         set_open.assert_awaited_once_with(123, False)
-        tg.assert_awaited_once_with("answerCallbackQuery", {
+        self.assertEqual(tg.await_args_list[0].args[0], "editMessageText")
+        self.assertEqual(tg.await_args_list[0].args[1], {
+            "chat_id": main.ADMIN_ID,
+            "message_id": 77,
+            "rich_message": main.header_rich_message("Blue-01", 123, False),
+        })
+        self.assertEqual(tg.await_args_list[1].args[0], "answerCallbackQuery")
+        self.assertEqual(tg.await_args_list[1].args[1], {
             "callback_query_id": "callback-toggle-close",
             "text": "Chat closed",
         })

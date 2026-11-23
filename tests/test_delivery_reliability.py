@@ -146,5 +146,62 @@ class AmbiguousSingleDeliveryTests(unittest.IsolatedAsyncioTestCase):
                     "text": "retry header",
                 }, {"alias": "Blue-01"})
 
+class OpenInboxHeaderSuppressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_open_alias_does_not_get_re_reported_after_ten_minutes(self):
+        old = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+        user = {
+            "telegram_user_id": 123,
+            "alias": "Blue-01",
+            "is_open": True,
+        }
+        with (
+            patch.object(main, "db_get", new=AsyncMock(return_value=[
+                {"last_message_at": old}
+            ])),
+            patch.object(main, "tg", new=AsyncMock(return_value={
+                "message_id": 901
+            })) as tg,
+            patch.object(main, "map_admin_message", new=AsyncMock()),
+            patch.object(main, "db_post", new=AsyncMock()),
+            patch.object(main, "technical", new=AsyncMock()),
+        ):
+            await main.relay_live({
+                "message_id": 109,
+                "from": {"id": 123},
+                "text": "new message while inbox is open",
+            }, user)
+
+        self.assertEqual(tg.await_args.args[0], "copyMessage")
+        self.assertEqual(tg.await_count, 1)
+
+    async def test_closed_alias_still_gets_periodic_header(self):
+        old = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+        user = {
+            "telegram_user_id": 123,
+            "alias": "Blue-01",
+            "is_open": False,
+        }
+        with (
+            patch.object(main, "db_get", new=AsyncMock(return_value=[
+                {"last_message_at": old}
+            ])),
+            patch.object(main, "tg", new=AsyncMock(side_effect=[
+                {"message_id": 902},
+                {"message_id": 903},
+            ])) as tg,
+            patch.object(main, "map_admin_message", new=AsyncMock()),
+            patch.object(main, "db_post", new=AsyncMock()),
+            patch.object(main, "technical", new=AsyncMock()),
+        ):
+            await main.relay_live({
+                "message_id": 110,
+                "from": {"id": 123},
+                "text": "new message while inbox is closed",
+            }, user)
+
+        self.assertEqual(tg.await_args_list[0].args[0], "sendRichMessage")
+        self.assertEqual(tg.await_args_list[1].args[0], "copyMessage")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1140,8 +1140,9 @@ async def deliver_album_to_admin(m, user, reply_to=None):
         )
         raise
     now = datetime.now(timezone.utc)
-    header = not sessions
-    if sessions:
+    is_active = bool(user.get("is_open"))
+    header = not is_active and not sessions
+    if sessions and not is_active:
         last = datetime.fromisoformat(
             sessions[0]["last_message_at"].replace("Z", "+00:00")
         )
@@ -1149,8 +1150,6 @@ async def deliver_album_to_admin(m, user, reply_to=None):
 
     if header:
         try:
-            state = await admin_state()
-            is_active = state.get("active_user_id") == source_uid
             sent_header = await tg("sendRichMessage", {
                 "chat_id": ADMIN_ID,
                 "rich_message": header_rich_message(
@@ -1448,14 +1447,13 @@ async def relay_live(m,user,reply_to=None):
 
     uid=m["from"]["id"]; now=datetime.now(timezone.utc)
     sessions=await db_get("anon_admin_sessions",{"sender_user_id":f"eq.{uid}","select":"*"})
-    header=not sessions
-    if sessions:
+    is_active = bool(user.get("is_open"))
+    header = not is_active and not sessions
+    if sessions and not is_active:
         last=datetime.fromisoformat(sessions[0]["last_message_at"].replace("Z","+00:00"))
         header=(now-last).total_seconds()>=600
     if header:
         try:
-            state = await admin_state()
-            is_active = state.get("active_user_id") == uid
             h=await tg("sendRichMessage",{
                 "chat_id":ADMIN_ID,
                 "rich_message":header_rich_message(user["alias"], uid, is_active),
@@ -1652,6 +1650,7 @@ async def handle_admin_callback(query):
     sender_id = (query.get("from") or {}).get("id")
     message = query.get("message") or {}
     chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
     data = query.get("data", "")
 
     if sender_id != ADMIN_ID or chat_id != ADMIN_ID:
@@ -1683,9 +1682,10 @@ async def handle_admin_callback(query):
     state = await admin_state()
     if state.get("active_user_id") == user["telegram_user_id"]:
         await close_active_alias()
+        is_open = False
         answer_text = "Chat closed"
     else:
-        opened = await open_alias(user["alias"], message.get("message_id"))
+        opened = await open_alias(user["alias"], message_id)
         if not opened:
             await tg("answerCallbackQuery", {
                 "callback_query_id": callback_id,
@@ -1693,8 +1693,16 @@ async def handle_admin_callback(query):
                 "show_alert": True,
             })
             return
+        is_open = True
         answer_text = "Chat opened"
 
+    await tg("editMessageText", {
+        "chat_id": ADMIN_ID,
+        "message_id": message_id,
+        "rich_message": header_rich_message(
+            user["alias"], user["telegram_user_id"], is_open
+        ),
+    })
     await tg("answerCallbackQuery", {
         "callback_query_id": callback_id,
         "text": answer_text,
