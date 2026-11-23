@@ -309,6 +309,9 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "db_get", new=AsyncMock(side_effect=[
                 [], [{"last_message_at": recent}]
             ])),
+            patch.object(main, "admin_state", new=AsyncMock(return_value={
+                "active_user_id": None
+            })),
             patch.object(main, "tg", new=AsyncMock(side_effect=[
                 {"message_id": 900},
                 rate_limit,
