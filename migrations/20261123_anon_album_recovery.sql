@@ -109,7 +109,8 @@ BEGIN
     FROM public.anon_album_buffer
     WHERE status = 'processing'
     GROUP BY source_chat_id, destination_chat_id, media_group_id
-    HAVING max(claimed_at) IS NULL OR max(claimed_at) < v_cutoff
+    HAVING count(*) FILTER (WHERE claimed_at IS NULL) > 0
+        OR max(claimed_at) < v_cutoff
     ORDER BY source_chat_id, destination_chat_id, media_group_id
   LOOP
     PERFORM pg_advisory_xact_lock(
