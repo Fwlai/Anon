@@ -48,7 +48,9 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
             "chat_id": main.ADMIN_ID,
             "from_chat_id": 123,
             "message_ids": [101, 102],
-            "reply_parameters": {"message_id": 555},
+            "reply_parameters": {
+            "message_id": 555, "allow_sending_without_reply": True
+        },
         })
         finish.assert_awaited_once_with(123, main.ADMIN_ID, "album-1", [
             {"source_message_id": 101, "destination_message_id": 901},
@@ -84,7 +86,9 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
             "chat_id": 123,
             "from_chat_id": main.ADMIN_ID,
             "message_ids": [201, 202],
-            "reply_parameters": {"message_id": 666},
+            "reply_parameters": {
+            "message_id": 666, "allow_sending_without_reply": True
+        },
         })
         finish.assert_awaited_once_with(main.ADMIN_ID, 123, "album-2", [
             {"source_message_id": 201, "destination_message_id": 801},
@@ -347,59 +351,38 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
 
 class AlbumSendingTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        main._album_messages.clear()
         main._album_tasks.clear()
 
-    async def test_album_with_reply_uses_send_media_group_in_order(self):
-        main._album_messages[(123, "album-mg")] = {
-            "ts": time.time(),
-            "messages": {
-                101: {"message_id": 101, "caption": "hi",
-                      "photo": [{"file_id": "small"}, {"file_id": "big"}]},
-                102: {"message_id": 102, "video": {"file_id": "vid"}},
-            },
-        }
-        sent = [{"message_id": 1}, {"message_id": 2}]
-
+    async def test_copy_messages_preserves_album_order_and_reply_target(self):
+        sent = [{"message_id": 901}, {"message_id": 902}, {"message_id": 903}]
         with patch.object(main, "tg", new=AsyncMock(return_value=sent)) as tg:
             result = await main.copy_album(
-                123, main.ADMIN_ID, "album-mg", [101, 102], 555
+                123, main.ADMIN_ID, "album-mg", [101, 102, 103], 555
             )
 
         self.assertEqual(result, sent)
-        tg.assert_awaited_once_with("sendMediaGroup", {
+        tg.assert_awaited_once_with("copyMessages", {
             "chat_id": main.ADMIN_ID,
-            "media": [
-                {"type": "photo", "media": "big", "caption": "hi"},
-                {"type": "video", "media": "vid"},
-            ],
+            "from_chat_id": 123,
+            "message_ids": [101, 102, 103],
             "reply_parameters": {
                 "message_id": 555, "allow_sending_without_reply": True
             },
         })
 
-    async def test_permanent_media_group_rejection_falls_back_to_copy(self):
-        main._album_messages[(123, "album-fb")] = {
-            "ts": time.time(),
-            "messages": {
-                101: {"message_id": 101, "photo": [{"file_id": "a"}]},
-                102: {"message_id": 102, "photo": [{"file_id": "b"}]},
-            },
-        }
-        rejected = main.IntegrationError(
-            "telegram", "sendMediaGroup", error_code=400, http_status=400
-        )
-        copied = [{"message_id": 7}, {"message_id": 8}]
-
-        with patch.object(main, "tg", new=AsyncMock(
-            side_effect=[rejected, copied]
-        )) as tg:
+    async def test_copy_messages_without_reply_uses_original_order(self):
+        sent = [{"message_id": 801}, {"message_id": 802}]
+        with patch.object(main, "tg", new=AsyncMock(return_value=sent)) as tg:
             result = await main.copy_album(
-                123, main.ADMIN_ID, "album-fb", [101, 102], None
+                123, 456, "album-no-reply", [201, 202], None
             )
 
-        self.assertEqual(result, copied)
-        self.assertEqual(tg.await_args_list[1].args[0], "copyMessages")
+        self.assertEqual(result, sent)
+        tg.assert_awaited_once_with("copyMessages", {
+            "chat_id": 456,
+            "from_chat_id": 123,
+            "message_ids": [201, 202],
+        })
 
     async def test_album_parts_return_fast_and_start_one_background_worker(self):
         message = {

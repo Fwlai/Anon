@@ -61,7 +61,6 @@ ALBUM_QUIET_SECONDS = 8
 ALBUM_MAX_WAIT_SECONDS = 45
 ALBUM_PROCESSING_LEASE_SECONDS = 300
 ALBUM_RECOVERY_INTERVAL_SECONDS = 5
-_album_messages = {}
 _album_tasks = {}
 _album_recovery_task = None
 
@@ -761,69 +760,21 @@ async def edit_incoming_copy(m):
             raise
 
 
-def remember_album_message(source_uid, group_id, m):
-    now = time.time()
-    for key in [k for k, v in _album_messages.items() if now - v["ts"] > 900]:
-        _album_messages.pop(key, None)
-    entry = _album_messages.setdefault((source_uid, group_id), {"ts": now, "messages": {}})
-    entry["ts"] = now
-    entry["messages"][m["message_id"]] = m
-
-
-def album_input_media(m):
-    if not m:
-        return None
-    if m.get("photo"):
-        item = {"type": "photo", "media": m["photo"][-1]["file_id"]}
-    elif m.get("video"):
-        item = {"type": "video", "media": m["video"]["file_id"]}
-    elif m.get("document"):
-        item = {"type": "document", "media": m["document"]["file_id"]}
-    elif m.get("audio"):
-        item = {"type": "audio", "media": m["audio"]["file_id"]}
-    else:
-        return None
-    if m.get("caption"):
-        item["caption"] = m["caption"]
-        if m.get("caption_entities"):
-            item["caption_entities"] = m["caption_entities"]
-    if item["type"] in ("photo", "video"):
-        if m.get("has_media_spoiler"):
-            item["has_spoiler"] = True
-        if m.get("show_caption_above_media"):
-            item["show_caption_above_media"] = True
-    return item
-
-
 async def copy_album(source_uid, destination_uid, group_id, message_ids, reply_target):
-    """Send an album in order. sendMediaGroup supports replying to a specific
-    message; copyMessages is the fallback when the original media is unknown."""
-    stored = _album_messages.get((source_uid, group_id), {}).get("messages", {})
-    media = [album_input_media(stored.get(mid)) for mid in message_ids]
-    if len(message_ids) > 1 and all(media):
-        payload = {"chat_id": destination_uid, "media": media}
-        if reply_target:
-            payload["reply_parameters"] = reply_params(reply_target)
-        try:
-            return await tg("sendMediaGroup", payload)
-        except Exception as exc:
-            if not telegram_permanent_rejection(exc):
-                raise
-    copy_payload = {
+    """Copy source messages as an album, preserving order and reply context."""
+    payload = {
         "chat_id": destination_uid,
         "from_chat_id": source_uid,
         "message_ids": message_ids,
     }
     if reply_target:
-        copy_payload["reply_parameters"] = {"message_id": reply_target}
-    return await tg("copyMessages", copy_payload)
-
+        payload["reply_parameters"] = reply_params(reply_target)
+    return await tg("copyMessages", payload)
 
 async def buffer_album_message(m, sender_uid, destination_uid, direction, reply_to=None):
     """Fast path: store one album part. Returns (source, group, accepted)."""
     source_uid = ADMIN_ID if direction == "admin_to_user" else sender_uid
     group_id = str(m["media_group_id"])
-    remember_album_message(source_uid, group_id, m)
     group_filter = {
         "source_chat_id": f"eq.{source_uid}",
         "destination_chat_id": f"eq.{destination_uid}",
@@ -945,7 +896,6 @@ async def run_album_worker(key, factory):
                 return
     finally:
         _album_tasks.pop(key, None)
-        _album_messages.pop((key[1], key[3]), None)
 
 
 def start_album_worker(key, factory):
