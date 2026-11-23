@@ -71,13 +71,15 @@ class StructuredLogTests(unittest.IsolatedAsyncioTestCase):
             "test.privacy", "ERROR",
             sender_user_id=5272351424, recipient_user_id=6530793575,
             alias="Blue-01", service="anon", repo="Fwlai/Anon",
-            branch="main", commit="abcdef123",
+            branch="main", commit="abcdef123", serviceName="anon",
+            projectName="anon-project", deploymentId="deploy-123",
             error="chat 5272351424 not found",
             nested={"chat_id": 123456789, "message_id": 42},
         )
         dumped = json.dumps(record)
         for hidden in ("5272351424", "6530793575", "123456789", "Blue-01",
-                      "Fwlai/Anon", "abcdef123", "service", "repo", "branch", "commit"):
+                      "Fwlai/Anon", "abcdef123", "anon-project", "deploy-123",
+                      "service", "repo", "branch", "commit"):
             self.assertNotIn(hidden, dumped)
         self.assertEqual(record["details"]["nested"], {})
 

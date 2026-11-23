@@ -95,6 +95,12 @@ SENSITIVE_KEYS = {
     "destination_message_id", "recipient_message_id", "source_message_ids",
     "destination_message_ids", "service", "repo", "branch", "commit", "url",
     "environment", "render", "request_id",
+    "project", "project_name", "project_id", "projectname", "projectid",
+    "service_name", "service_id", "servicename", "serviceid",
+    "deployment_id", "deploymentid", "deploy_id", "deployid",
+    "instance_id", "instanceid", "region", "platform", "hostname", "host",
+    "render_service_id", "render_instance_id", "render_deploy_id",
+    "event_id", "eventid",
 }
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -287,7 +293,7 @@ def render_metadata():
 def scrub(value):
     """Remove numeric Telegram identifiers from anything that gets logged."""
     if isinstance(value, dict):
-        return {k: scrub(v) for k, v in value.items() if str(k) not in SENSITIVE_KEYS}
+        return {k: scrub(v) for k, v in value.items() if str(k).lower() not in SENSITIVE_KEYS
     if isinstance(value, (list, tuple)):
         return [scrub(v) for v in value]
     if isinstance(value, str):

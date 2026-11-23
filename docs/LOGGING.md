@@ -8,7 +8,7 @@ The group receives only startup/shutdown and user-registration events, errors, a
 
 Notifications are plain, concise text rather than expanded JSON or Rich Messages. They contain the event name and timestamp, with only short safe diagnostic fields such as provider, operation, HTTP status, error code, or a sanitized error summary when relevant.
 
-Aliases, numeric Telegram IDs, message IDs, repository/branch/commit details, and Render service metadata are removed from log records and group notifications. Service/deployment information is available only through the admin-only `/health` command in the configured log group.
+Aliases, numeric Telegram IDs, message IDs, project/service/deployment/instance metadata, repository/branch/commit details, and Render metadata are removed from log records and group notifications. Service/deployment information is available only through the admin-only `/health` command in the configured log group.
 
 ## Health command
 
