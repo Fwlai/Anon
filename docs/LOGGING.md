@@ -1,36 +1,25 @@
 # Logging
 
-Anon writes structured JSON records to Render stdout and forwards technical events to the registered Telegram log group.
+Anon keeps structured application records in Render stdout for troubleshooting, with private identifiers and platform metadata redacted.
 
-## Telegram Rich Messages
+## Telegram log group
 
-Telegram log notifications use the official Bot API `sendRichMessage` method with an `InputRichMessage.markdown` payload.
+The group receives only startup/shutdown and user-registration events, errors, and a small allowlist of actionable warnings. Routine message events and ordinary forwarding successes are not sent to the group. Repeated non-critical events are suppressed for five minutes per event type.
 
-Each notification contains:
-- A collapsed `<details>` block whose always-visible summary is the event name, rendered in monospace with `<code>`
-- The complete structured event record inside that block as a fenced `json` code block
-- Syntax-language metadata (`json`) so supported Telegram clients can render the record as formatted code when the block is expanded
+Notifications are plain, concise text rather than expanded JSON or Rich Messages. They contain the event name and timestamp, with only short safe diagnostic fields such as provider, operation, HTTP status, error code, or a sanitized error summary when relevant.
 
-The details block uses Telegram Rich Markdown's native collapsible disclosure syntax. Markdown remains enabled inside `<details>`, so the JSON code fence and its language formatting are preserved rather than flattened into plain text. Event names are normalized to a restricted character set so untrusted values cannot inject Markdown or extra lines.
+Aliases, numeric Telegram IDs, message IDs, repository/branch/commit details, and Render service metadata are removed from log records and group notifications. Service/deployment information is available only through the admin-only `/health` command in the configured log group.
 
-The JSON is serialized with UTF-8 characters preserved and indentation for readability. If a record exceeds the conservative Telegram display budget, its details are replaced with a truncation marker and the names of the available fields before sending.
+## Health command
 
-The bot does not fall back to a regular `sendMessage` if rich-message delivery fails. This is intentional: a timeout or lost response can mean Telegram accepted the first request, and retrying through another method could create duplicate log notifications. Delivery failures are recorded in Render stdout instead.
+The admin can use `/health` in the registered log group to check:
+- Database connectivity
+- Telegram webhook status and pending update count
+- Album recovery queue state
+- Error/warning counters since process start
+- Uptime and deployment/service metadata
 
-Telegram Rich Messages were introduced in Bot API 10.1. The implementation calls the Bot API directly over HTTPS, so it does not depend on a framework wrapper supporting the new method.
-
-## Log content and privacy
-
-The record includes:
-- UTC timestamp, severity, service, environment, and event name
-- Request correlation ID and Telegram update ID when applicable
-- Render service, instance, Git commit, branch, and external URL metadata when Render provides them
-- Structured event details
-- Provider, operation, HTTP status, error code, and a redacted error message for Telegram and Supabase API failures
-
-HTTP requests are logged with method, path, response status, and duration. Successful routine requests go to Render stdout; failed or unusually slow requests are also forwarded to the Telegram log group.
-
-Private Telegram message text, captions, and media contents are never included in technical logs. Render webhook details are sanitized before being recorded.
+The command is ignored in private chats and never relayed to anonymous users.
 
 ## Render platform events
 
@@ -39,10 +28,8 @@ The app exposes `POST /render/webhook` for signed Render service-event notificat
 1. In Render, open **Environment** for the `anon` service and add `RENDER_WEBHOOK_SECRET` using the signing secret from the Render webhook settings. Keep the secret private.
 2. Optionally add `RENDER_API_KEY` with a Render API key. When present, Anon calls the Render **Retrieve event** endpoint to attach the event's expanded `details` object.
 3. In the Render workspace, open **Integrations → Webhooks → Create Webhook**. Set the destination URL to `https://anon-mr5s.onrender.com/render/webhook`.
-4. Select events such as `build_started`, `build_ended`, `deploy_started`, `deploy_ended`, `server_failed`, `server_available`, `server_restarted`, `service_suspended`, and `service_resumed`.
+4. Select lifecycle events such as build/deploy start and end, server failure/availability/restart, and service suspension/resumption.
 
 Render webhook notifications use Standard Webhooks signatures. Anon verifies the HMAC signature against the raw request body and rejects timestamps outside the five-minute window. Events for a different service are ignored when `RENDER_SERVICE_ID` is available.
 
-Render workspace webhooks require a Pro plan or higher. If **Integrations → Webhooks** is unavailable, the workspace plan must be upgraded before platform events can be pushed to Anon.
-
-These webhooks provide platform lifecycle events and event metadata, not a live copy of every raw build-log line. Full build and deploy output remains available in the Render dashboard. Application stdout logs are structured JSON and are searchable in Render Logs.
+Render workspace webhooks require a Pro plan or higher. Full build/deploy output remains in the Render dashboard; application stdout logs are structured JSON and searchable in Render Logs.
