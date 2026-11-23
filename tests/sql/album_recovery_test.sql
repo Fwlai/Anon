@@ -6,30 +6,32 @@ DECLARE
 BEGIN
   INSERT INTO public.anon_album_buffer (
     source_chat_id, destination_chat_id, sender_user_id, direction,
-    media_group_id, message_id, status, last_seen_at
+    media_group_id, message_id, status, last_seen_at, claimed_at
   ) VALUES
     (123, -1004323044570, 123, 'user_to_admin', 'recovery-stale', 801,
-     'processing', now() - interval '10 minutes'),
+     'processing', now() - interval '10 minutes', now() - interval '10 minutes'),
     (123, -1004323044570, 123, 'user_to_admin', 'recovery-stale', 802,
-     'processing', now() - interval '10 minutes'),
+     'processing', now() - interval '10 minutes', now() - interval '10 minutes'),
+    (123, -1004323044570, 123, 'user_to_admin', 'recovery-legacy', 805,
+     'processing', now() - interval '10 minutes', NULL),
     (123, -1004323044570, 123, 'user_to_admin', 'recovery-fresh', 803,
-     'processing', now()),
+     'processing', now(), now()),
     (123, -1004323044570, 123, 'user_to_admin', 'recovery-pending', 804,
-     'pending', now() - interval '10 minutes');
+     'pending', now() - interval '10 minutes', NULL);
 
   SELECT public.anon_expire_stale_albums(300)
     INTO v_expired;
 
-  IF v_expired <> 2 THEN
-    RAISE EXCEPTION 'expected 2 stale album parts to expire, got %', v_expired;
+  IF v_expired <> 3 THEN
+    RAISE EXCEPTION 'expected 3 stale album parts to expire, got %', v_expired;
   END IF;
 
   IF EXISTS (
     SELECT 1 FROM public.anon_album_buffer
-    WHERE media_group_id = 'recovery-stale'
+    WHERE media_group_id IN ('recovery-stale', 'recovery-legacy')
       AND status <> 'delivered_unmapped'
   ) THEN
-    RAISE EXCEPTION 'stale processing album was not marked delivered_unmapped';
+    RAISE EXCEPTION 'stale or legacy processing album was not marked delivered_unmapped';
   END IF;
 
   IF EXISTS (
