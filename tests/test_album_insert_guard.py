@@ -39,7 +39,7 @@ class AlbumInsertGuardTests(unittest.TestCase):
 
 
 class AlbumInsertRaceFallbackTests(unittest.IsolatedAsyncioTestCase):
-    async def test_suppressed_late_insert_does_not_claim_or_create_a_second_album(self):
+    async def test_buffer_fast_path_persists_album_part_and_refreshes_quiet_window(self):
         message = {
             "message_id": 303,
             "from": {"id": 123},
@@ -48,25 +48,20 @@ class AlbumInsertRaceFallbackTests(unittest.IsolatedAsyncioTestCase):
         }
 
         with (
-            patch.object(main, "db_get", new=AsyncMock(return_value=[])),
+            patch.object(main, "db_get", new=AsyncMock(return_value=[])) as db_get,
             patch.object(main, "db_post", new=AsyncMock(return_value=[])) as db_post,
             patch.object(main, "db_patch", new=AsyncMock(return_value=[])) as db_patch,
-            patch.object(main, "db_rpc", new=AsyncMock(return_value=[])) as db_rpc,
-            patch.object(main.asyncio, "sleep", new=AsyncMock()),
             patch.object(main, "technical", new=AsyncMock()),
         ):
-            source, group_id, rows = await main.claim_album_messages(
+            source, group_id, accepted = await main.buffer_album_message(
                 message, 123, main.ADMIN_ID, "user_to_admin"
             )
 
-        self.assertEqual((source, group_id, rows), (123, "album-race", []))
+        self.assertEqual((source, group_id, accepted), (123, "album-race", True))
+        db_get.assert_awaited_once()
         db_post.assert_awaited_once()
         db_patch.assert_awaited_once()
-        self.assertEqual(db_rpc.await_count, 4)
-        self.assertTrue(all(
-            item.args[0] == "anon_claim_album"
-            for item in db_rpc.await_args_list
-        ))
+        self.assertEqual(db_post.await_args.args[0], "anon_album_buffer")
 
 
 if __name__ == "__main__":
