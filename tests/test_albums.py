@@ -333,7 +333,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
 
         header_calls = [
             call for call in tg.await_args_list
-            if call.args[0] == "sendMessage"
+            if call.args[0] == "sendRichMessage"
         ]
         album_calls = [
             call for call in tg.await_args_list
@@ -361,7 +361,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
             "reply_to_message_id": None,
         }]
         failure = main.IntegrationError(
-            "telegram", "sendMessage", error_code=429, http_status=429
+            "telegram", "sendRichMessage", error_code=429, http_status=429
         )
 
         with (
@@ -396,7 +396,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
             "reply_to_message_id": None,
         }]
         failure = main.IntegrationError(
-            "telegram", "sendMessage", transport_error="ReadTimeout"
+            "telegram", "sendRichMessage", transport_error="ReadTimeout"
         )
 
         with (

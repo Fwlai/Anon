@@ -500,34 +500,6 @@ async def set_open(uid, value):
     )
 
 
-async def refresh_header_button(uid, is_open, exclude_message_id=None):
-    rows = await db_get("anon_admin_sessions", {
-        "sender_user_id": f"eq.{uid}",
-        "select": "last_header_message_id",
-        "limit": "1",
-    })
-    if not rows:
-        return
-    message_id = rows[0].get("last_header_message_id")
-    if not message_id or message_id == exclude_message_id:
-        return
-    try:
-        await tg("editMessageReplyMarkup", {
-            "chat_id": ADMIN_ID,
-            "message_id": message_id,
-            "reply_markup": header_reply_markup(
-                {"telegram_user_id": uid}, is_open=is_open
-            ),
-        })
-    except Exception as exc:
-        await technical(
-            "message.header_button_refresh_failed",
-            "WARNING",
-            notify_group=False,
-            **exception_fields(exc),
-        )
-
-
 async def activate_alias(uid, exclude_header_message_id=None):
     state = await admin_state()
     previous_uid = state.get("active_user_id")
@@ -535,12 +507,8 @@ async def activate_alias(uid, exclude_header_message_id=None):
 
     if previous_uid is not None and previous_uid != uid:
         await set_open(previous_uid, False)
-        await refresh_header_button(
-            previous_uid, False, exclude_header_message_id
-        )
 
     await set_open(uid, True)
-    await refresh_header_button(uid, True, exclude_header_message_id)
 
 
 async def close_active_alias(exclude_header_message_id=None):
@@ -549,9 +517,6 @@ async def close_active_alias(exclude_header_message_id=None):
     await set_active(None)
     if active_uid is not None:
         await set_open(active_uid, False)
-        await refresh_header_button(
-            active_uid, False, exclude_header_message_id
-        )
     return active_uid
 
 async def send_user(uid, text, parse_mode=None):
@@ -604,28 +569,24 @@ def kind_of(m):
     if m.get("invoice"): return "invoice"
     return "text"
 
-def header_text(alias):
-    return f'<blockquote>Alias: <code>{html.escape(alias)}</code></blockquote>'
-
-
-def header_reply_markup(user, uid=None, is_open=None):
-    uid = int(uid if uid is not None else user["telegram_user_id"])
-    opened = user.get("is_open", False) if is_open is None else bool(is_open)
+def header_rich_message(alias, uid=None, is_open=False):
+    text = ["Alias: ", {"type": "code", "text": str(alias)}]
+    if uid is not None:
+        text.extend([
+            " ",
+            {
+                "type": "button",
+                "button": {
+                    "text": "close" if is_open else "open",
+                    "style": "success" if is_open else "danger",
+                    "callback_data": f"anon:open:{int(uid)}",
+                },
+            },
+        ])
     return {
-        "inline_keyboard": [[{
-            "text": "open",
-            "style": "success" if opened else "danger",
-            "callback_data": f"anon:open:{uid}",
-        }]]
+        "blocks": [{"type": "paragraph", "text": text}],
+        "is_rtl": True,
     }
-
-
-def reply_params(message_id):
-    return {"message_id": message_id, "allow_sending_without_reply": True}
-
-
-def header_text(alias):
-    return f'<blockquote>Alias: <code>{html.escape(alias)}</code></blockquote>'
 
 
 def reply_params(message_id):
@@ -1190,11 +1151,11 @@ async def deliver_album_to_admin(m, user, reply_to=None):
         try:
             state = await admin_state()
             is_active = state.get("active_user_id") == source_uid
-            sent_header = await tg("sendMessage", {
+            sent_header = await tg("sendRichMessage", {
                 "chat_id": ADMIN_ID,
-                "text": header_text(user["alias"]),
-                "parse_mode": "HTML",
-                "reply_markup": header_reply_markup(user, source_uid, is_active),
+                "rich_message": header_rich_message(
+                    user["alias"], source_uid, is_active
+                ),
             })
         except Exception as exc:
             if telegram_rate_limited(exc):
@@ -1495,11 +1456,9 @@ async def relay_live(m,user,reply_to=None):
         try:
             state = await admin_state()
             is_active = state.get("active_user_id") == uid
-            h=await tg("sendMessage",{
+            h=await tg("sendRichMessage",{
                 "chat_id":ADMIN_ID,
-                "text":header_text(user["alias"]),
-                "parse_mode":"HTML",
-                "reply_markup":header_reply_markup(user, uid, is_active),
+                "rich_message":header_rich_message(user["alias"], uid, is_active),
             })
         except Exception as exc:
             if telegram_rate_limited(exc):
@@ -1723,15 +1682,10 @@ async def handle_admin_callback(query):
 
     state = await admin_state()
     if state.get("active_user_id") == user["telegram_user_id"]:
-        await close_active_alias(message.get("message_id"))
-        is_open = False
+        await close_active_alias()
         answer_text = "Chat closed"
     else:
-        opened = await open_alias(
-            user["alias"],
-            message.get("message_id"),
-            exclude_header_message_id=message.get("message_id"),
-        )
+        opened = await open_alias(user["alias"], message.get("message_id"))
         if not opened:
             await tg("answerCallbackQuery", {
                 "callback_query_id": callback_id,
@@ -1739,18 +1693,13 @@ async def handle_admin_callback(query):
                 "show_alert": True,
             })
             return
-        is_open = True
         answer_text = "Chat opened"
 
-    await tg("editMessageReplyMarkup", {
-        "chat_id": chat_id,
-        "message_id": message["message_id"],
-        "reply_markup": header_reply_markup(user, is_open=is_open),
-    })
     await tg("answerCallbackQuery", {
         "callback_query_id": callback_id,
         "text": answer_text,
     })
+
 
 async def mapped_admin_reply_target_for_user(uid, admin_message_id):
     rows = await db_get("anon_message_map", {
@@ -1896,9 +1845,32 @@ async def route_admin(m):
     await react(ADMIN_ID,m["message_id"],"👎")
     await technical("admin.message_rejected_no_target")
 
+async def send_inbox_status():
+    state = await admin_state()
+    active_uid = state.get("active_user_id")
+    user = await get_user(active_uid) if active_uid is not None else None
+
+    if not user:
+        if active_uid is not None:
+            await set_active(None)
+        rich_message = header_rich_message("none")
+    else:
+        rich_message = header_rich_message(
+            user["alias"], active_uid, is_open=True
+        )
+
+    await tg("sendRichMessage", {
+        "chat_id": ADMIN_ID,
+        "rich_message": rich_message,
+    })
+
+
 async def admin_command(message):
     text = message.get("text", "")
     if re.fullmatch(r"/health(?:@\w+)?\s*", text, re.I):
+        return True
+    if re.fullmatch(r"/w(?:@\w+)?\s*", text, re.I):
+        await send_inbox_status()
         return True
     match=re.fullmatch(r"/i(?:@\w+)?(?:\s+(.+))?\s*",text,re.I)
     if match:
