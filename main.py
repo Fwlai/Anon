@@ -590,7 +590,7 @@ def utf16_length(value):
     return len(value.encode("utf-16-le")) // 2
 
 
-async def should_notify_group(event, level):
+def should_notify_group(event, level):
     """Only errors, selected warnings, and notable events reach the log group."""
     level = level.upper()
     if level in ("ERROR", "CRITICAL"):
