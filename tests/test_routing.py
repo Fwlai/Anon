@@ -160,7 +160,7 @@ class AdminRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         react.assert_awaited_once_with(main.ADMIN_ID, 504, "👎")
 
-    async def test_open_alias_only_selects_recipient(self):
+    async def test_open_alias_switches_exclusive_active_recipient(self):
         user = {
             "telegram_user_id": 123,
             "alias": "Blue-01",
@@ -168,14 +168,22 @@ class AdminRoutingTests(unittest.IsolatedAsyncioTestCase):
         }
 
         with patch.object(main, "get_alias", new=AsyncMock(return_value=user)), \
+             patch.object(main, "admin_state", new=AsyncMock(return_value={
+                 "active_user_id": 456
+             })), \
              patch.object(main, "set_active", new=AsyncMock()) as set_active, \
              patch.object(main, "set_open", new=AsyncMock()) as set_open, \
+             patch.object(main, "refresh_header_button", new=AsyncMock()) as refresh, \
              patch.object(main, "technical", new=AsyncMock()):
             opened = await main.open_alias("Blue-01", 505)
 
         self.assertTrue(opened)
         set_active.assert_awaited_once_with(123)
-        set_open.assert_awaited_once_with(123, True)
+        self.assertEqual(set_open.await_args_list, [
+            unittest.mock.call(456, False),
+            unittest.mock.call(123, True),
+        ])
+        refresh.assert_awaited_once_with(456, False, None)
 
     async def test_header_button_style_tracks_persisted_open_state(self):
         user = {"telegram_user_id": 123, "is_open": False}
@@ -234,19 +242,78 @@ class AdminRoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(calls[1].args[0], "answerCallbackQuery")
 
-    async def test_close_command_persists_closed_state_for_active_alias(self):
+    async def test_close_command_closes_only_the_active_alias(self):
         message = {"message_id": 78, "text": "/c"}
         with patch.object(main, "admin_state", new=AsyncMock(
             return_value={"active_user_id": 123}
         )), patch.object(main, "set_open", new=AsyncMock()) as set_open, \
              patch.object(main, "set_active", new=AsyncMock()) as set_active, \
+             patch.object(main, "refresh_header_button", new=AsyncMock()) as refresh, \
              patch.object(main, "technical", new=AsyncMock()):
             handled = await main.admin_command(message)
 
         self.assertTrue(handled)
         set_open.assert_awaited_once_with(123, False)
         set_active.assert_awaited_once_with(None)
+        refresh.assert_awaited_once_with(123, False, None)
 
+
+    async def test_open_button_toggles_active_alias_closed(self):
+        user = {
+            "telegram_user_id": 123,
+            "alias": "Blue-01",
+            "blocked_by_admin": False,
+            "is_open": True,
+        }
+        query = {
+            "id": "callback-toggle-close",
+            "from": {"id": main.ADMIN_ID},
+            "message": {"message_id": 77, "chat": {"id": main.ADMIN_ID}},
+            "data": "anon:open:123",
+        }
+        with patch.object(main, "get_user", new=AsyncMock(return_value=user)), \
+             patch.object(main, "admin_state", new=AsyncMock(return_value={
+                 "active_user_id": 123
+             })), \
+             patch.object(main, "set_active", new=AsyncMock()) as set_active, \
+             patch.object(main, "set_open", new=AsyncMock()) as set_open, \
+             patch.object(main, "refresh_header_button", new=AsyncMock()) as refresh, \
+             patch.object(main, "tg", new=AsyncMock()) as tg:
+            await main.handle_admin_callback(query)
+
+        set_active.assert_awaited_once_with(None)
+        set_open.assert_awaited_once_with(123, False)
+        refresh.assert_awaited_once_with(123, False, 77)
+        self.assertEqual(
+            tg.await_args_list[0].args[1]["reply_markup"]["inline_keyboard"][0][0]["style"],
+            "danger",
+        )
+
+    async def test_header_button_style_uses_global_open_state(self):
+        user = {"telegram_user_id": 123, "is_open": True}
+        self.assertEqual(
+            main.header_reply_markup(user, is_open=False)["inline_keyboard"][0][0]["style"],
+            "danger",
+        )
+        self.assertEqual(
+            main.header_reply_markup(user, is_open=True)["inline_keyboard"][0][0]["style"],
+            "success",
+        )
+
+    async def test_refresh_header_button_updates_stored_header_message(self):
+        with patch.object(main, "db_get", new=AsyncMock(return_value=[{
+            "last_header_message_id": 333
+        }])), patch.object(main, "tg", new=AsyncMock()) as tg, \
+             patch.object(main, "technical", new=AsyncMock()):
+            await main.refresh_header_button(456, False)
+
+        tg.assert_awaited_once_with("editMessageReplyMarkup", {
+            "chat_id": main.ADMIN_ID,
+            "message_id": 333,
+            "reply_markup": main.header_reply_markup(
+                {"telegram_user_id": 456}, is_open=False
+            ),
+        })
 
 
     async def test_unknown_slash_message_uses_selected_alias(self):
