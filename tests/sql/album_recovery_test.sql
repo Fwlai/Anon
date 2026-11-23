@@ -3,19 +3,36 @@ SET ROLE service_role;
 DO $$
 DECLARE
   v_expired integer;
+  v_claimed integer;
 BEGIN
   INSERT INTO public.anon_album_buffer (
     source_chat_id, destination_chat_id, sender_user_id, direction,
     media_group_id, message_id, status, last_seen_at, claimed_at
   ) VALUES
     (123, -1004323044570, 123, 'user_to_admin', 'recovery-stale', 801,
-     'processing', now() - interval '10 minutes', now() - interval '10 minutes'),
+     'pending', now() - interval '10 minutes', NULL),
     (123, -1004323044570, 123, 'user_to_admin', 'recovery-stale', 802,
-     'processing', now() - interval '10 minutes', now() - interval '10 minutes'),
+     'pending', now() - interval '10 minutes', NULL),
     (123, -1004323044570, 123, 'user_to_admin', 'recovery-fresh', 803,
      'processing', now(), now()),
     (123, -1004323044570, 123, 'user_to_admin', 'recovery-pending', 804,
      'pending', now() - interval '10 minutes', NULL);
+
+  SELECT count(*) INTO v_claimed
+  FROM public.anon_claim_album(
+    123, -1004323044570, 'recovery-stale', 1
+  );
+
+  IF v_claimed <> 2 THEN
+    RAISE EXCEPTION 'expected two album parts to be claimed, got %', v_claimed;
+  END IF;
+
+  UPDATE public.anon_album_buffer
+  SET claimed_at = now() - interval '10 minutes'
+  WHERE source_chat_id = 123
+    AND destination_chat_id = -1004323044570
+    AND media_group_id = 'recovery-stale'
+    AND status = 'processing';
 
   SELECT public.anon_expire_stale_albums(300)
     INTO v_expired;
