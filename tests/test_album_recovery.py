@@ -4,6 +4,43 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import main
 
 
+class AlbumQuietWindowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_claim_waits_for_extended_quiet_window(self):
+        message = {
+            "message_id": 909,
+            "from": {"id": 123},
+            "media_group_id": "quiet-window",
+        }
+        rows = [{
+            "sender_user_id": 123,
+            "direction": "user_to_admin",
+            "message_id": 909,
+            "reply_to_message_id": None,
+        }]
+
+        with (
+            patch.object(main, "buffer_album_message", new=AsyncMock(
+                return_value=(123, "quiet-window", True)
+            )) as buffer,
+            patch.object(main.asyncio, "sleep", new=AsyncMock()) as sleep,
+            patch.object(main, "db_rpc", new=AsyncMock(return_value=rows)) as rpc,
+        ):
+            source, group, claimed = await main.claim_album_messages(
+                message, 123, main.ADMIN_ID, "user_to_admin"
+            )
+
+        self.assertGreaterEqual(main.ALBUM_QUIET_SECONDS, 8)
+        self.assertEqual((source, group, claimed), (123, "quiet-window", rows))
+        buffer.assert_awaited_once()
+        sleep.assert_awaited_once_with(main.ALBUM_QUIET_SECONDS + 0.3)
+        rpc.assert_awaited_once_with("anon_claim_album", {
+            "p_source_chat_id": 123,
+            "p_destination_chat_id": main.ADMIN_ID,
+            "p_media_group_id": "quiet-window",
+            "p_quiet_seconds": main.ALBUM_QUIET_SECONDS,
+        })
+
+
 class DurableAlbumRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_recovery_restarts_workers_for_old_pending_groups(self):
         rows = [

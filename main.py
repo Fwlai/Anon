@@ -57,7 +57,7 @@ _STARTED_AT = time.time()
 # Albums: Telegram delivers album parts one by one and waits for each reply,
 # so parts are buffered quickly and the album is delivered in the background
 # once no new part has arrived for ALBUM_QUIET_SECONDS.
-ALBUM_QUIET_SECONDS = 3
+ALBUM_QUIET_SECONDS = 8
 ALBUM_MAX_WAIT_SECONDS = 45
 ALBUM_PROCESSING_LEASE_SECONDS = 300
 ALBUM_RECOVERY_INTERVAL_SECONDS = 5
