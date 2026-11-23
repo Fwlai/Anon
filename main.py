@@ -705,8 +705,11 @@ async def build_health_report():
         lines.append("Telegram webhook: ❌ could not check")
 
     try:
-        unknown = await db_get("anon_album_buffer", {
-            "status": "eq.unknown", "select": "message_id", "limit": "1",
+        unmapped = await db_get("anon_album_buffer", {
+            "status": "eq.delivered_unmapped", "select": "message_id", "limit": "1",
+        })
+        failed = await db_get("anon_album_buffer", {
+            "status": "eq.failed", "select": "message_id", "limit": "1",
         })
         pending = await db_get("anon_album_buffer", {
             "status": "eq.pending", "select": "message_id", "limit": "1",
@@ -714,9 +717,9 @@ async def build_health_report():
         processing = await db_get("anon_album_buffer", {
             "status": "eq.processing", "select": "message_id", "limit": "1",
         })
-        if unknown:
+        if unmapped or failed:
             healthy = False
-            lines.append("Albums: ⚠️ ambiguous deliveries need manual review")
+            lines.append("Albums: ⚠️ delivery outcome needs review")
         elif pending or processing:
             lines.append("Albums: ✅ recovery queue active")
         else:
