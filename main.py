@@ -1582,6 +1582,23 @@ async def open_alias(alias,cmdid):
     await set_active(uid)
     await technical("admin.chat_selected", alias=u["alias"])
 
+async def mapped_admin_reply_target_for_user(uid, admin_message_id):
+    rows = await db_get("anon_message_map", {
+        "admin_message_id": f"eq.{admin_message_id}",
+        "sender_user_id": f"eq.{uid}",
+        "select": "user_message_id",
+        "limit": "1",
+    })
+    if rows:
+        return rows[0]["user_message_id"]
+    rows = await db_get("anon_outbound_map", {
+        "admin_message_id": f"eq.{admin_message_id}",
+        "sender_user_id": f"eq.{uid}",
+        "select": "user_message_id",
+        "limit": "1",
+    })
+    return rows[0]["user_message_id"] if rows else None
+
 async def route_admin(m):
     text=m.get("text","")
     if text.startswith("/") and await admin_command(m):
@@ -1596,12 +1613,24 @@ async def route_admin(m):
         })
         if album_rows:
             uid = album_rows[0]["recipient_user_id"]
+            reply_target = album_rows[0].get("reply_to_message_id")
+            if reply_target is None and m.get("reply_to_message"):
+                reply_target = await mapped_admin_reply_target_for_user(
+                    uid, m["reply_to_message"]["message_id"]
+                )
+                if reply_target is not None:
+                    reserved = await db_rpc("anon_reserve_admin_album_route", {
+                        "p_source_chat_id": ADMIN_ID,
+                        "p_media_group_id": str(m["media_group_id"]),
+                        "p_candidate_user_id": uid,
+                        "p_reply_to_message_id": reply_target,
+                    })
+                    if reserved:
+                        reply_target = reserved[0].get("reply_to_message_id")
             user = await get_user(uid)
             if user and not user.get("blocked_by_admin"):
                 try:
-                    await send_to_user(
-                        m, uid, album_rows[0].get("reply_to_message_id")
-                    )
+                    await send_to_user(m, uid, reply_target)
                 except Exception as exc:
                     await technical(
                         "message.admin_album_delivery_failed",
