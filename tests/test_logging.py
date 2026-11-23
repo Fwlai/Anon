@@ -147,7 +147,7 @@ class StructuredLogTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("`", text)
         self.assertNotIn("```", text)
         self.assertNotIn("\\n", text)
-        self.assertIn("bad_event____json", text)
+        self.assertIn("bad_event_n___json", text)
 
     async def test_repeated_error_is_sent_once_per_cooldown(self):
         with patch.object(main, "log_chat_id", new=AsyncMock(return_value=12345)), \

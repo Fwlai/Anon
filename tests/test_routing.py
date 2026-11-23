@@ -250,6 +250,35 @@ class ContentCopyTests(unittest.IsolatedAsyncioTestCase):
         map_outbound.assert_awaited_once_with(902, 123, 602)
 
 
+    async def test_admin_album_later_part_can_fill_missing_reply_target(self):
+        message = {
+            "message_id": 511,
+            "from": {"id": main.ADMIN_ID},
+            "media_group_id": "admin-album-reply-fill",
+            "reply_to_message": {"message_id": 999},
+            "photo": [{}],
+        }
+        existing_route = [{"recipient_user_id": 123, "reply_to_message_id": None}]
+        reply_mapping = [{"user_message_id": 77}]
+        updated_route = [{"recipient_user_id": 123, "reply_to_message_id": 77}]
+        with (
+            patch.object(main, "db_get", new=AsyncMock(side_effect=[existing_route, reply_mapping])),
+            patch.object(main, "db_rpc", new=AsyncMock(return_value=updated_route)) as reserve,
+            patch.object(main, "get_user", new=AsyncMock(return_value={
+                "telegram_user_id": 123, "blocked_by_admin": False
+            })),
+            patch.object(main, "send_to_user", new=AsyncMock()) as send,
+            patch.object(main, "react", new=AsyncMock()),
+        ):
+            await main.route_admin(message)
+        reserve.assert_awaited_once_with("anon_reserve_admin_album_route", {
+            "p_source_chat_id": main.ADMIN_ID,
+            "p_media_group_id": "admin-album-reply-fill",
+            "p_candidate_user_id": 123,
+            "p_reply_to_message_id": 77,
+        })
+        send.assert_awaited_once_with(message, 123, 77)
+
     async def test_admin_album_keeps_recipient_selected_by_first_album_item(self):
         message = {
             "message_id": 507,
