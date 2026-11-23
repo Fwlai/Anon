@@ -2091,6 +2091,17 @@ async def webhook(request: Request):
             except Exception as exc:
                 await technical("telegram.unregistered_group_leave_failed", "ERROR",
                                 notify_group=False, **exception_fields(exc))
+        if (
+            registered and int(chat.get("id", 0)) == registered
+            and uid == ADMIN_ID and not edited
+            and re.fullmatch(r"/health(?:@\w+)?\s*", message.get("text", ""), re.I)
+        ):
+            try:
+                await send_health_report(chat["id"])
+            except Exception as exc:
+                await technical("system.health_report_failed", "ERROR",
+                                notify_group=False, **exception_fields(exc))
+            return await ack_update(update_id, lease_token)
         return await ack_update(update_id, lease_token)
 
     if uid == ADMIN_ID:
