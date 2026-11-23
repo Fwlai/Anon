@@ -78,7 +78,7 @@ NOTIFY_WARNING_EVENTS = {
 }
 GROUP_LOG_FIELDS = {
     "provider", "operation", "http_status", "error_code", "exception_type",
-    "transport_error", "error", "message", "stage", "direction", "message_count",
+    "transport_error", "error", "stage", "direction", "message_count",
     "item_count", "retry_after_seconds",
 }
 _notify_state = {}
