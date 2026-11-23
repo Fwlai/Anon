@@ -549,6 +549,14 @@ def reply_params(message_id):
     return {"message_id": message_id, "allow_sending_without_reply": True}
 
 
+def header_text(alias):
+    return f'<blockquote>Alias: <code>{html.escape(alias)}</code></blockquote>'
+
+
+def reply_params(message_id):
+    return {"message_id": message_id, "allow_sending_without_reply": True}
+
+
 async def map_outbound(user_mid,uid,admin_mid):
     await db_post("anon_outbound_map",{"user_message_id":user_mid,"sender_user_id":uid,"admin_message_id":admin_mid},"resolution=ignore-duplicates,return=minimal")
 
@@ -1400,7 +1408,7 @@ async def relay_live(m,user,reply_to=None):
         header=(now-last).total_seconds()>=600
     if header:
         try:
-            h=await tg("sendMessage",{"chat_id":ADMIN_ID,"text":f'<blockquote>Chat: <code>{html.escape(user["alias"])}</code></blockquote>',"parse_mode":"HTML"})
+            h=await tg("sendMessage",{"chat_id":ADMIN_ID,"text":header_text(user["alias"]),"parse_mode":"HTML"})
         except Exception as exc:
             if telegram_rate_limited(exc):
                 raise
@@ -1433,7 +1441,7 @@ async def relay_live(m,user,reply_to=None):
             sender_user_id=uid,
         )
     p={"chat_id":ADMIN_ID,"from_chat_id":uid,"message_id":m["message_id"]}
-    if reply_to: p["reply_parameters"]={"message_id":reply_to}
+    if reply_to: p["reply_parameters"]=reply_params(reply_to)
     try:
         cp=await tg("copyMessage",p)
     except Exception as exc:
@@ -1684,6 +1692,8 @@ async def route_admin(m):
 
 async def admin_command(message):
     text = message.get("text", "")
+    if re.fullmatch(r"/health(?:@\w+)?\s*", text, re.I):
+        return True
     match=re.fullmatch(r"/i(?:@\w+)?(?:\s+(.+))?\s*",text,re.I)
     if match:
         arg=(match.group(1) or "").strip()
@@ -1705,7 +1715,7 @@ async def admin_command(message):
         target = rows[0]
         await set_block(target["telegram_user_id"], "blocked_by_admin", True)
         try:
-            await send_user(target["telegram_user_id"], "You blocked by Fwlai")
+            await send_user(target["telegram_user_id"], "You have been blocked by Fwlai")
         except Exception as exc:
             await technical("telegram.block_notice_failed", "WARNING",
                             alias=target["alias"], notify_group=False, **exception_fields(exc))
