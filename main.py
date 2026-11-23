@@ -71,13 +71,30 @@ IMPORTANT_EVENTS = {
     "system.startup_failed",
     "system.shutdown_started",
     "user.registered",
+    "admin.user_blocked",
+    "admin.user_unblocked",
+}
+NOTIFY_WARNING_EVENTS = {
+    "message.album_late_part_rejected",
+    "message.album_stale_processing_marked_unknown",
+    "maintenance.retention_cleanup_failed",
+    "telegram.unregistered_group_leave_failed",
+}
+GROUP_LOG_FIELDS = {
+    "provider", "operation", "http_status", "error_code", "exception_type",
+    "transport_error", "error", "stage", "direction", "message_count",
+    "item_count", "retry_after_seconds",
 }
 _notify_state = {}
 _stats = {"errors": 0, "warnings": 0, "last_error": None}
 SENSITIVE_KEYS = {
-    "sender_user_id", "recipient_user_id", "user_id", "telegram_user_id",
+    "alias", "sender_user_id", "recipient_user_id", "user_id", "telegram_user_id",
     "chat_id", "source_chat_id", "destination_chat_id", "admin_user_id",
     "active_user_id", "update_id", "telegram_update_id", "from_id", "uid",
+    "message_id", "admin_message_id", "user_message_id", "source_message_id",
+    "destination_message_id", "recipient_message_id", "source_message_ids",
+    "destination_message_ids", "service", "repo", "branch", "commit", "url",
+    "environment", "render", "request_id",
 }
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -560,12 +577,32 @@ def utf16_length(value):
 
 
 def should_notify_group(event, level):
-    """Only problems and a few notable events go to the log group."""
-    return level.upper() in ("WARNING", "ERROR", "CRITICAL") or event in IMPORTANT_EVENTS
+    """Only errors, selected warnings, and notable events reach the log group."""
+    level = level.upper()
+    if level in ("ERROR", "CRITICAL"):
+        return True
+    if level == "WARNING":
+        return event in NOTIFY_WARNING_EVENTS
+    return event in IMPORTANT_EVENTS
+
+
+def group_log_message(record, suppressed=0):
+    event = re.sub(r"[^A-Za-z0-9_.:-]", "_", str(record.get("event", "unknown")))[:100]
+    level = str(record.get("level", "INFO")).upper()
+    lines = [f"{level} · {event}", str(record.get("timestamp", ""))]
+    details = scrub(record.get("details") or {})
+    if isinstance(details, dict):
+        selected = [f"{key}: {details[key]}" for key in GROUP_LOG_FIELDS
+                    if key in details and details[key] not in (None, "", [], {})]
+        if selected:
+            lines.extend(selected[:6])
+    if suppressed:
+        lines.append(f"Repeated events suppressed: {suppressed}")
+    return "\n".join(lines)[:900]
 
 
 def notify_gate(event, level):
-    """Suppress repeats of the same problem for NOTIFY_COOLDOWN_SECONDS."""
+    """Suppress repeats of the same non-critical event for five minutes."""
     if event in IMPORTANT_EVENTS:
         return True, 0
     now = time.monotonic()
@@ -586,10 +623,9 @@ async def technical(event, level="INFO", notify_group=True, **details):
     elif level == "WARNING":
         _stats["warnings"] += 1
     notify = notify_group and should_notify_group(event, level)
+    suppressed = 0
     if notify:
         notify, suppressed = notify_gate(event, level)
-        if notify and suppressed:
-            details["repeated"] = suppressed
     record = make_log_record(event, level, **details)
     write_log_record(record)
     if not notify:
@@ -598,41 +634,23 @@ async def technical(event, level="INFO", notify_group=True, **details):
         chat_id = await log_chat_id()
         if not chat_id:
             return record
-        text = json.dumps(record, ensure_ascii=False, indent=2)
-        if utf16_length(text) > 3000:
-            record["details"] = {"truncated": True, "available_fields": list(details.keys())}
-            text = json.dumps(record, ensure_ascii=False, indent=2)
-        # Backtick-escape code fence markers inside JSON strings to preserve the Markdown block.
-        safe_json = text.replace("```", "\\u0060\\u0060\\u0060")
-        event_label = re.sub(r"[^A-Za-z0-9_.:-]", "_", str(event))[:120] or "unknown"
-        rich_markdown = (
-            f"<details><summary><code>{event_label}</code></summary>\n\n"
-            f"```json\n{safe_json}\n```\n"
-            f"</details>"
-        )
         try:
-            await tg("sendRichMessage", {
+            await tg("sendMessage", {
                 "chat_id": chat_id,
-                "rich_message": {"markdown": rich_markdown},
+                "text": group_log_message(record, suppressed),
                 "disable_notification": level not in ("ERROR", "CRITICAL"),
             })
-        except Exception as rich_exc:
-            # Avoid duplicate delivery if Telegram accepted the request but the
-            # response was lost or timed out. Rich logs are the only group format.
+        except Exception as exc:
             write_log_record(make_log_record(
-                "logging.rich_message_delivery_failed", "WARNING",
-                source_event=event, **exception_fields(rich_exc),
+                "logging.telegram_delivery_failed", "ERROR",
+                source_event=event, **exception_fields(exc),
             ))
     except Exception as exc:
-        failure = make_log_record(
-            "logging.telegram_delivery_failed",
-            "ERROR",
-            source_event=event,
-            **exception_fields(exc),
-        )
-        write_log_record(failure)
+        write_log_record(make_log_record(
+            "logging.telegram_delivery_failed", "ERROR",
+            source_event=event, **exception_fields(exc),
+        ))
     return record
-
 
 def format_duration(seconds):
     seconds = int(seconds)
@@ -1666,8 +1684,7 @@ async def route_admin(m):
 async def admin_command(message):
     text = message.get("text", "")
     if re.fullmatch(r"/health(?:@\w+)?\s*", text, re.I):
-        # /health only works inside the log group; never relay it to a user.
-        await react(ADMIN_ID, message["message_id"], "👎")
+        # The webhook handles /health only inside the registered log group.
         return True
     match=re.fullmatch(r"/i(?:@\w+)?(?:\s+(.+))?\s*",text,re.I)
     if match:
@@ -1690,7 +1707,7 @@ async def admin_command(message):
         target = rows[0]
         await set_block(target["telegram_user_id"], "blocked_by_admin", True)
         try:
-            await send_user(target["telegram_user_id"], "You blocked by Fwlai")
+            await send_user(target["telegram_user_id"], "You have been blocked by Fwlai")
         except Exception as exc:
             await technical("telegram.block_notice_failed", "WARNING",
                             alias=target["alias"], notify_group=False, **exception_fields(exc))
