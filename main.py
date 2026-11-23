@@ -1244,7 +1244,7 @@ async def deliver_album_to_admin(m, user, reply_to=None):
                 {
                     "sender_user_id": uid,
                     "last_message_at": now.isoformat(),
-                    "last_header_message_id": h["message_id"],
+                    "last_header_message_id": sent_header["message_id"],
                 },
                 "resolution=merge-duplicates,return=minimal",
             ),
@@ -1523,7 +1523,11 @@ async def relay_live(m,user,reply_to=None):
         await persist_after_delivery(
             lambda: db_post(
                 "anon_admin_sessions",
-                {"sender_user_id": uid, "last_message_at": now.isoformat()},
+                {
+                    "sender_user_id": uid,
+                    "last_message_at": now.isoformat(),
+                    "last_header_message_id": h["message_id"],
+                },
                 "resolution=merge-duplicates,return=minimal",
             ),
             "message.session_persistence_failed",
