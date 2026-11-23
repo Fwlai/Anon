@@ -288,25 +288,25 @@ def render_metadata():
     return {name: os.getenv(env) for name, env in keys.items() if os.getenv(env)}
 
 
+def scrub(value):
+    """Remove identifiers, aliases, and platform metadata from application logs."""
+    if isinstance(value, dict):
+        return {k: scrub(v) for k, v in value.items() if str(k).lower() not in SENSITIVE_KEYS}
+    if isinstance(value, (list, tuple)):
+        return [scrub(v) for v in value]
+    if isinstance(value, str):
+        return re.sub(r"-?\b\d{7,}\b", "[id]", value)
+    return value
+
+
 def make_log_record(event, level="INFO", **details):
     record = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "level": level.upper(),
-        "service": "anon",
-        "environment": "render" if os.getenv("RENDER") == "true" else "local",
         "event": event,
     }
-    request_id = REQUEST_ID.get()
-    if request_id:
-        record["request_id"] = request_id
-    update_id = UPDATE_ID.get()
-    if update_id is not None:
-        record["telegram_update_id"] = update_id
-    metadata = render_metadata()
-    if metadata:
-        record["render"] = metadata
     if details:
-        record["details"] = details
+        record["details"] = scrub(details)
     return record
 
 
@@ -582,49 +582,163 @@ def utf16_length(value):
     return len(value.encode("utf-16-le")) // 2
 
 
+async def should_notify_group(event, level):
+    """Only errors, selected warnings, and notable events reach the log group."""
+    level = level.upper()
+    if level in ("ERROR", "CRITICAL"):
+        return True
+    if level == "WARNING":
+        return event in NOTIFY_WARNING_EVENTS
+    return event in IMPORTANT_EVENTS
+
+
+def group_log_message(record, suppressed=0):
+    event = re.sub(r"[^A-Za-z0-9_.:-]", "_", str(record.get("event", "unknown")))[:100]
+    level = str(record.get("level", "INFO")).upper()
+    lines = [f"{level} · {event}", str(record.get("timestamp", ""))]
+    details = scrub(record.get("details") or {})
+    if isinstance(details, dict):
+        selected = [f"{key}: {details[key]}" for key in GROUP_LOG_FIELDS
+                    if key in details and details[key] not in (None, "", [], {})]
+        if selected:
+            lines.extend(selected[:6])
+    if suppressed:
+        lines.append(f"Repeated events suppressed: {suppressed}")
+    return "\n".join(lines)[:900]
+
+
+def notify_gate(event, level):
+    """Suppress repeats of the same non-critical event for five minutes."""
+    if event in IMPORTANT_EVENTS:
+        return True, 0
+    now = time.monotonic()
+    state = _notify_state.get(event)
+    if state and now - state["at"] < NOTIFY_COOLDOWN_SECONDS:
+        state["suppressed"] += 1
+        return False, 0
+    suppressed = state["suppressed"] if state else 0
+    _notify_state[event] = {"at": now, "suppressed": 0}
+    return True, suppressed
+
+
 async def technical(event, level="INFO", notify_group=True, **details):
+    level = str(level).upper()
+    if level == "ERROR":
+        _stats["errors"] += 1
+        _stats["last_error"] = (event, datetime.now(timezone.utc))
+    elif level == "WARNING":
+        _stats["warnings"] += 1
+    notify = notify_group and should_notify_group(event, level)
+    suppressed = 0
+    if notify:
+        notify, suppressed = notify_gate(event, level)
     record = make_log_record(event, level, **details)
     write_log_record(record)
-    if not notify_group:
+    if not notify:
         return record
     try:
         chat_id = await log_chat_id()
         if not chat_id:
             return record
-        text = json.dumps(record, ensure_ascii=False, indent=2)
-        if utf16_length(text) > 3000:
-            record["details"] = {"truncated": True, "available_fields": list(details.keys())}
-            text = json.dumps(record, ensure_ascii=False, indent=2)
-        # Backtick-escape code fence markers inside JSON strings to preserve the Markdown block.
-        safe_json = text.replace("```", "\\u0060\\u0060\\u0060")
-        event_label = re.sub(r"[^A-Za-z0-9_.:-]", "_", str(event))[:120] or "unknown"
-        rich_markdown = (
-            f"<details><summary><code>{event_label}</code></summary>\n\n"
-            f"```json\n{safe_json}\n```\n"
-            f"</details>"
-        )
         try:
-            await tg("sendRichMessage", {
+            await tg("sendMessage", {
                 "chat_id": chat_id,
-                "rich_message": {"markdown": rich_markdown},
-                "disable_notification": level.upper() in ("INFO",),
+                "text": group_log_message(record, suppressed),
+                "disable_notification": level not in ("ERROR", "CRITICAL"),
             })
-        except Exception as rich_exc:
-            # Avoid duplicate delivery if Telegram accepted the request but the
-            # response was lost or timed out. Rich logs are the only group format.
+        except Exception as exc:
             write_log_record(make_log_record(
-                "logging.rich_message_delivery_failed", "WARNING",
-                source_event=event, **exception_fields(rich_exc),
+                "logging.telegram_delivery_failed", "ERROR",
+                source_event=event, **exception_fields(exc),
             ))
     except Exception as exc:
-        failure = make_log_record(
-            "logging.telegram_delivery_failed",
-            "ERROR",
-            source_event=event,
-            **exception_fields(exc),
-        )
-        write_log_record(failure)
+        write_log_record(make_log_record(
+            "logging.telegram_delivery_failed", "ERROR",
+            source_event=event, **exception_fields(exc),
+        ))
     return record
+
+def format_duration(seconds):
+    seconds = int(seconds)
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+async def build_health_report():
+    lines = []
+    healthy = True
+
+    started = time.perf_counter()
+    try:
+        await db_get("anon_users", {"select": "alias", "limit": "1"})
+        lines.append(f"Database: ✅ {round((time.perf_counter() - started) * 1000)} ms")
+    except Exception:
+        healthy = False
+        lines.append("Database: ❌ unreachable")
+
+    try:
+        info = await tg("getWebhookInfo", {})
+        pending = info.get("pending_update_count", 0)
+        last_error = info.get("last_error_message")
+        mark = "✅" if not last_error and pending < 20 else "⚠️"
+        text = f"Telegram webhook: {mark} {pending} pending"
+        if last_error:
+            text += f" · last error: {safe_error_message(last_error)[:80]}"
+            healthy = False
+        lines.append(text)
+    except Exception:
+        healthy = False
+        lines.append("Telegram webhook: ❌ could not check")
+
+    try:
+        unknown = await db_get("anon_album_buffer", {
+            "status": "eq.unknown", "select": "message_id", "limit": "1",
+        })
+        pending = await db_get("anon_album_buffer", {
+            "status": "eq.pending", "select": "message_id", "limit": "1",
+        })
+        processing = await db_get("anon_album_buffer", {
+            "status": "eq.processing", "select": "message_id", "limit": "1",
+        })
+        if unknown:
+            healthy = False
+            lines.append("Albums: ⚠️ ambiguous deliveries need manual review")
+        elif pending or processing:
+            lines.append("Albums: ✅ recovery queue active")
+        else:
+            lines.append("Albums: ✅ no queued work")
+    except Exception:
+        healthy = False
+        lines.append("Albums: ❌ recovery queue unavailable")
+
+    errors = _stats["errors"]
+    line = f"Since start: {errors} errors, {_stats['warnings']} warnings"
+    if _stats["last_error"]:
+        event, when = _stats["last_error"]
+        line += f" (last: {event} at {when.strftime('%H:%M')} UTC)"
+    lines.append(line)
+
+    meta = render_metadata()
+    server = [meta.get("service"), meta.get("repo")]
+    if meta.get("branch") or meta.get("commit"):
+        server.append(f"{meta.get('branch', '')}@{(meta.get('commit') or '')[:7]}")
+    server_text = " · ".join(part for part in server if part)
+    if server_text:
+        lines.append(f"Server: {server_text}")
+    lines.append(f"Uptime: {format_duration(time.time() - _STARTED_AT)}")
+
+    head = "✅ Anon is healthy" if healthy else "⚠️ Anon has problems"
+    return head + "\n" + "\n".join(lines)
+
+
+async def send_health_report(chat_id):
+    await tg("sendMessage", {"chat_id": chat_id, "text": await build_health_report()})
 
 def edit_request(m, chat_id, message_id):
     if "text" in m:
