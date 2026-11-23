@@ -1627,18 +1627,33 @@ async def route_admin(m):
             uid = album_rows[0]["recipient_user_id"]
             reply_target = album_rows[0].get("reply_to_message_id")
             if reply_target is None and m.get("reply_to_message"):
-                reply_target = await mapped_admin_reply_target_for_user(
+                mapped_reply_target = await mapped_admin_reply_target_for_user(
                     uid, m["reply_to_message"]["message_id"]
                 )
-                if reply_target is not None:
+                if mapped_reply_target is not None:
+                    await db_patch(
+                        "anon_album_routes",
+                        {
+                            "source_chat_id": f"eq.{ADMIN_ID}",
+                            "media_group_id": f"eq.{m['media_group_id']}",
+                            "recipient_user_id": f"eq.{uid}",
+                            "reply_to_message_id": "is.null",
+                        },
+                        {"reply_to_message_id": mapped_reply_target},
+                    )
                     reserved = await db_rpc("anon_reserve_admin_album_route", {
                         "p_source_chat_id": ADMIN_ID,
                         "p_media_group_id": str(m["media_group_id"]),
                         "p_candidate_user_id": uid,
-                        "p_reply_to_message_id": reply_target,
+                        "p_reply_to_message_id": mapped_reply_target,
                     })
                     if reserved:
-                        reply_target = reserved[0].get("reply_to_message_id")
+                        reply_target = (
+                            reserved[0].get("reply_to_message_id")
+                            or mapped_reply_target
+                        )
+                    else:
+                        reply_target = mapped_reply_target
             user = await get_user(uid)
             if user and not user.get("blocked_by_admin"):
                 try:
