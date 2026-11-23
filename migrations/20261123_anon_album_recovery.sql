@@ -67,7 +67,7 @@ BEGIN
 
   RETURN NEXT;
 END;
-$;
+$$;
 
 REVOKE ALL ON FUNCTION public.anon_reserve_admin_album_route(bigint, text, bigint, bigint)
   FROM PUBLIC, anon, authenticated;
