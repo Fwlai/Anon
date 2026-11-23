@@ -250,5 +250,133 @@ class ContentCopyTests(unittest.IsolatedAsyncioTestCase):
         map_outbound.assert_awaited_once_with(902, 123, 602)
 
 
+    async def test_admin_album_later_part_can_fill_missing_reply_target(self):
+        message = {
+            "message_id": 511,
+            "from": {"id": main.ADMIN_ID},
+            "media_group_id": "admin-album-reply-fill",
+            "reply_to_message": {"message_id": 999},
+            "photo": [{}],
+        }
+        existing_route = [{"recipient_user_id": 123, "reply_to_message_id": None}]
+        reply_mapping = [{"user_message_id": 77}]
+        updated_route = [{"recipient_user_id": 123, "reply_to_message_id": 77}]
+        with (
+            patch.object(main, "db_get", new=AsyncMock(side_effect=[existing_route, reply_mapping])),
+            patch.object(main, "db_rpc", new=AsyncMock(return_value=updated_route)) as reserve,
+            patch.object(main, "get_user", new=AsyncMock(return_value={
+                "telegram_user_id": 123, "blocked_by_admin": False
+            })),
+            patch.object(main, "send_to_user", new=AsyncMock()) as send,
+            patch.object(main, "react", new=AsyncMock()),
+        ):
+            await main.route_admin(message)
+        reserve.assert_awaited_once_with("anon_reserve_admin_album_route", {
+            "p_source_chat_id": main.ADMIN_ID,
+            "p_media_group_id": "admin-album-reply-fill",
+            "p_candidate_user_id": 123,
+            "p_reply_to_message_id": 77,
+        })
+        send.assert_awaited_once_with(message, 123, 77)
+
+    async def test_admin_album_keeps_recipient_selected_by_first_album_item(self):
+        message = {
+            "message_id": 507,
+            "from": {"id": main.ADMIN_ID},
+            "media_group_id": "admin-album",
+            "photo": [{}],
+        }
+
+        with patch.object(main, "db_get", new=AsyncMock(return_value=[{
+            "recipient_user_id": 123,
+            "reply_to_message_id": 88,
+        }])), patch.object(main, "get_user", new=AsyncMock(return_value={
+            "telegram_user_id": 123,
+            "alias": "Blue-01",
+            "blocked_by_admin": False,
+        })), patch.object(main, "send_to_user", new=AsyncMock()) as send, \
+             patch.object(main, "admin_state", new=AsyncMock()) as state:
+            await main.route_admin(message)
+
+        send.assert_awaited_once_with(message, 123, 88)
+        state.assert_not_awaited()
+
+
+    async def test_album_route_reservation_keeps_atomic_recipient(self):
+        message = {
+            "message_id": 508,
+            "from": {"id": main.ADMIN_ID},
+            "media_group_id": "admin-album-race",
+            "photo": [{}],
+        }
+
+        with patch.object(main, "db_rpc", new=AsyncMock(return_value=[{
+            "recipient_user_id": 123,
+            "reply_to_message_id": 44,
+        }])) as db_rpc, \
+             patch.object(main, "relay_album_to_user", new=AsyncMock()) as relay:
+            await main.send_to_user(message, 999, 22)
+
+        db_rpc.assert_awaited_once_with("anon_reserve_admin_album_route", {
+            "p_source_chat_id": main.ADMIN_ID,
+            "p_media_group_id": "admin-album-race",
+            "p_candidate_user_id": 999,
+            "p_reply_to_message_id": 22,
+        })
+        relay.assert_awaited_once_with(message, 123, 44)
+
+
+
+    async def test_admin_reply_rate_limit_is_retried(self):
+        message = {
+            "message_id": 509,
+            "from": {"id": main.ADMIN_ID},
+            "reply_to_message": {"message_id": 702},
+        }
+        with patch.object(main, "db_get", new=AsyncMock(return_value=[{
+            "sender_user_id": 123,
+            "user_message_id": 203,
+        }])), patch.object(main, "get_user", new=AsyncMock(return_value={
+            "alias": "Blue-01",
+            "blocked_by_admin": False,
+        })), patch.object(main, "send_to_user", new=AsyncMock(
+            side_effect=main.IntegrationError(
+                "telegram", "copyMessage", error_code=429, http_status=429
+            )
+        )), patch.object(main, "react", new=AsyncMock()), \
+             patch.object(main, "technical", new=AsyncMock()):
+            with self.assertRaises(main.IntegrationError):
+                await main.route_admin(message)
+
+
+
+    async def test_selected_alias_rate_limit_is_retried(self):
+        message = {
+            "message_id": 510,
+            "from": {"id": main.ADMIN_ID},
+            "text": "retry this delivery",
+        }
+
+        with (
+            patch.object(main, "admin_state", new=AsyncMock(return_value={
+                "active_user_id": 123
+            })),
+            patch.object(main, "get_user", new=AsyncMock(return_value={
+                "telegram_user_id": 123,
+                "alias": "Blue-01",
+                "blocked_by_admin": False,
+            })),
+            patch.object(main, "send_to_user", new=AsyncMock(
+                side_effect=main.IntegrationError(
+                    "telegram", "copyMessage", error_code=429, http_status=200
+                )
+            )),
+            patch.object(main, "react", new=AsyncMock()),
+            patch.object(main, "technical", new=AsyncMock()),
+        ):
+            with self.assertRaises(main.IntegrationError):
+                await main.route_admin(message)
+
+
 if __name__ == "__main__":
     unittest.main()
