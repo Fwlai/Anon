@@ -19,6 +19,16 @@ CREATE INDEX IF NOT EXISTS anon_album_buffer_processing_lease_idx
   ON public.anon_album_buffer (claimed_at)
   WHERE status = 'processing';
 
+-- Keep user-deletion cascades efficient as these relay tables grow.
+CREATE INDEX IF NOT EXISTS anon_album_buffer_sender_user_id_idx
+  ON public.anon_album_buffer (sender_user_id);
+
+CREATE INDEX IF NOT EXISTS anon_album_routes_recipient_user_id_idx
+  ON public.anon_album_routes (recipient_user_id);
+
+CREATE INDEX IF NOT EXISTS anon_message_map_sender_user_id_idx
+  ON public.anon_message_map (sender_user_id);
+
 CREATE OR REPLACE FUNCTION public.anon_claim_album(
   p_source_chat_id bigint,
   p_destination_chat_id bigint,

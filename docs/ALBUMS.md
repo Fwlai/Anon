@@ -2,7 +2,7 @@
 
 Album parts are persisted in `anon_album_buffer` before the webhook is acknowledged. The Render process uses a background worker for delivery, while a periodic recovery loop scans the database for quiet groups still marked `pending`. This makes queued albums survive a process restart without depending on an in-memory task or cached media object. The worker waits for an eight-second quiet window after the most recently received part before claiming a group, reducing premature closure when Telegram webhook updates arrive with a delay.
 
-When a worker claims a group, PostgreSQL records `claimed_at` and changes all its parts to `processing` under the same advisory lock used by insertion and completion. A normal Telegram 429 response or a database failure detected before any Telegram send releases the group back to `pending`, allowing the worker or recovery loop to retry it. Successful delivery stores all message mappings atomically.
+When a worker claims a group, PostgreSQL records `claimed_at` and changes all its parts to `processing` under the same advisory lock used by insertion and completion. The migration also adds covering indexes for the album and message-map user foreign keys to keep deletion cascades efficient. A normal Telegram 429 response or a database failure detected before any Telegram send releases the group back to `pending`, allowing the worker or recovery loop to retry it. Successful delivery stores all message mappings atomically.
 
 ## Ambiguous outcomes
 

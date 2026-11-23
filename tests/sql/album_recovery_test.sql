@@ -115,6 +115,12 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'service_role cannot execute album recovery function';
   END IF;
+
+  IF to_regclass('public.anon_album_buffer_sender_user_id_idx') IS NULL
+     OR to_regclass('public.anon_album_routes_recipient_user_id_idx') IS NULL
+     OR to_regclass('public.anon_message_map_sender_user_id_idx') IS NULL THEN
+    RAISE EXCEPTION 'one or more Anon foreign-key indexes are missing';
+  END IF;
 END
 $$;
 
