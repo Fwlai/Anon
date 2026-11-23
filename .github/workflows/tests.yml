@@ -72,6 +72,7 @@ jobs:
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_retention_indexes.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_update_leases.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261123_anon_album_recovery.sql
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261123_anon_chat_open_state.sql
       - name: Verify album routing, claims, mappings, late-part guard, and indexes
         run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/sql/album_migrations_test.sql
       - name: Verify stale album recovery
