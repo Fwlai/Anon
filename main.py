@@ -2191,6 +2191,7 @@ async def startup():
             await technical("system.startup_completed")
         except Exception as exc:
             await technical("system.startup_failed", "ERROR", **exception_fields(exc))
+            raise RuntimeError("Anon startup checks failed; refusing to serve webhooks") from exc
     else:
         missing = [name for name, value in {
             "TELEGRAM_BOT_TOKEN": BOT_TOKEN,
@@ -2200,6 +2201,9 @@ async def startup():
             "SUPABASE_SERVICE_ROLE_KEY": SUPABASE_KEY,
         }.items() if not value]
         await technical("system.configuration_incomplete", "ERROR", missing_variables=missing)
+        raise RuntimeError(
+            "Anon configuration is incomplete; refusing to serve webhooks"
+        )
 
 @app.on_event("shutdown")
 async def shutdown():
