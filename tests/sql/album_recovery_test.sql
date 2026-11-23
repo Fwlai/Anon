@@ -22,8 +22,8 @@ BEGIN
   SELECT public.anon_expire_stale_albums(300)
     INTO v_expired;
 
-  IF v_expired <> 2 THEN
-    RAISE EXCEPTION 'expected 2 stale album parts to expire, got %', v_expired;
+  IF v_expired <> 3 THEN
+    RAISE EXCEPTION 'expected 3 stale or legacy album parts to expire, got %', v_expired;
   END IF;
 
   IF EXISTS (
