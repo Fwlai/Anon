@@ -229,11 +229,14 @@ class AdminRoutingTests(unittest.IsolatedAsyncioTestCase):
             "data": "anon:open:123",
         }
         with patch.object(main, "get_user", new=AsyncMock(return_value=user)), \
+             patch.object(main, "admin_state", new=AsyncMock(return_value={
+                 "active_user_id": None
+             })), \
              patch.object(main, "open_alias", new=AsyncMock(return_value=True)) as open_alias, \
              patch.object(main, "tg", new=AsyncMock()) as tg:
             await main.handle_admin_callback(query)
 
-        open_alias.assert_awaited_once_with("Blue-01", 77)
+        open_alias.assert_awaited_once_with("Blue-01", 77, exclude_header_message_id=77)
         calls = tg.await_args_list
         self.assertEqual(calls[0].args[0], "editMessageReplyMarkup")
         self.assertEqual(
