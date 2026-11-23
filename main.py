@@ -2181,21 +2181,25 @@ async def webhook(request: Request):
 
 @app.on_event("startup")
 async def startup():
+    global _album_recovery_task
     await technical("system.startup_started", notify_group=False)
     if all([BOT_TOKEN, ADMIN_ID, WEBHOOK_SECRET, SUPABASE_URL, SUPABASE_KEY]):
         try:
             await db_get("anon_users", {"select": "telegram_user_id", "limit": "1"})
+            await db_rpc("anon_expire_stale_albums", {
+                "p_lease_seconds": ALBUM_PROCESSING_LEASE_SECONDS,
+            })
             base_url = os.getenv("RENDER_EXTERNAL_URL", "https://anon-mr5s.onrender.com").rstrip("/")
             await tg("setWebhook", {
                 "url": f"{base_url}/telegram/webhook",
                 "secret_token": WEBHOOK_SECRET,
                 "allowed_updates": ["message", "edited_message", "my_chat_member"]
             })
-            await technical("system.startup_completed", database="connected",
-                            telegram_webhook="configured",
-                            allowed_updates=["message", "edited_message", "my_chat_member"])
+            _album_recovery_task = asyncio.create_task(album_recovery_loop())
+            await technical("system.startup_completed")
         except Exception as exc:
             await technical("system.startup_failed", "ERROR", **exception_fields(exc))
+            raise RuntimeError("Anon startup checks failed; refusing to serve webhooks") from exc
     else:
         missing = [name for name, value in {
             "TELEGRAM_BOT_TOKEN": BOT_TOKEN,
@@ -2205,8 +2209,30 @@ async def startup():
             "SUPABASE_SERVICE_ROLE_KEY": SUPABASE_KEY,
         }.items() if not value]
         await technical("system.configuration_incomplete", "ERROR", missing_variables=missing)
+        raise RuntimeError(
+            "Anon configuration is incomplete; refusing to serve webhooks"
+        )
 
 @app.on_event("shutdown")
+async def shutdown():
+    global _album_recovery_task
+    if BOT_TOKEN and ADMIN_ID:
+        try:
+            await technical("system.shutdown_started")
+        except Exception as exc:
+            log.error(make_log_record("system.shutdown_log_failed", "ERROR",
+                                      **exception_fields(exc)))
+    tasks = []
+    if _album_recovery_task is not None:
+        _album_recovery_task.cancel()
+        tasks.append(_album_recovery_task)
+        _album_recovery_task = None
+    tasks.extend(list(_album_tasks.values()))
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    await client.aclose()
 async def shutdown():
     if BOT_TOKEN and ADMIN_ID:
         try:
