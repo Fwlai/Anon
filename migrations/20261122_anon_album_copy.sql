@@ -59,7 +59,11 @@ BEGIN
     p_reply_to_message_id
   )
   ON CONFLICT (source_chat_id, media_group_id)
-  DO UPDATE SET recipient_user_id = route.recipient_user_id
+  DO UPDATE SET
+    recipient_user_id = route.recipient_user_id,
+    reply_to_message_id = COALESCE(
+      route.reply_to_message_id, EXCLUDED.reply_to_message_id
+    )
   RETURNING route.recipient_user_id, route.reply_to_message_id
     INTO recipient_user_id, reply_to_message_id;
 

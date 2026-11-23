@@ -29,6 +29,52 @@ CREATE INDEX IF NOT EXISTS anon_album_routes_recipient_user_id_idx
 CREATE INDEX IF NOT EXISTS anon_message_map_sender_user_id_idx
   ON public.anon_message_map (sender_user_id);
 
+CREATE OR REPLACE FUNCTION public.anon_reserve_admin_album_route(
+  p_source_chat_id bigint,
+  p_media_group_id text,
+  p_candidate_user_id bigint,
+  p_reply_to_message_id bigint DEFAULT NULL
+)
+RETURNS TABLE (
+  recipient_user_id bigint,
+  reply_to_message_id bigint
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public
+AS $
+BEGIN
+  INSERT INTO public.anon_album_routes AS route (
+    source_chat_id,
+    media_group_id,
+    recipient_user_id,
+    reply_to_message_id
+  )
+  VALUES (
+    p_source_chat_id,
+    p_media_group_id,
+    p_candidate_user_id,
+    p_reply_to_message_id
+  )
+  ON CONFLICT (source_chat_id, media_group_id)
+  DO UPDATE SET
+    recipient_user_id = route.recipient_user_id,
+    reply_to_message_id = COALESCE(
+      route.reply_to_message_id, EXCLUDED.reply_to_message_id
+    )
+  RETURNING route.recipient_user_id, route.reply_to_message_id
+    INTO recipient_user_id, reply_to_message_id;
+
+  RETURN NEXT;
+END;
+$;
+
+REVOKE ALL ON FUNCTION public.anon_reserve_admin_album_route(bigint, text, bigint, bigint)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.anon_reserve_admin_album_route(bigint, text, bigint, bigint)
+  TO service_role;
+
+
 CREATE OR REPLACE FUNCTION public.anon_claim_album(
   p_source_chat_id bigint,
   p_destination_chat_id bigint,
