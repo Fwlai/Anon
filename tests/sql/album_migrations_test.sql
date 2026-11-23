@@ -339,4 +339,4 @@ BEGIN
   END IF;
 
 END
-$;
+$$;
