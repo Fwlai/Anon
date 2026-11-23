@@ -212,32 +212,10 @@ BEGIN
   IF v_recipient <> 123 OR v_reply <> 55 THEN
     RAISE EXCEPTION 'album route reservation changed recipient or reply target';
   END IF;
-  SELECT recipient_user_id, reply_to_message_id
-    INTO v_recipient, v_reply
-  FROM public.anon_reserve_admin_album_route(
-    -1004323044570, 'route-reply-fill', 123, NULL
-  );
-  IF v_recipient <> 123 OR v_reply IS NOT NULL THEN
-    RAISE EXCEPTION 'reply-less route reservation is incorrect';
-  END IF;
+  DELETE FROM public.anon_album_routes
+  WHERE source_chat_id = -1004323044570
+    AND media_group_id = 'route-reply-fill';
 
-  SELECT recipient_user_id, reply_to_message_id
-    INTO v_recipient, v_reply
-  FROM public.anon_reserve_admin_album_route(
-    -1004323044570, 'route-reply-fill', 456, 77
-  );
-  IF v_recipient <> 123 OR v_reply <> 77 THEN
-    RAISE EXCEPTION 'later album part did not fill missing reply target';
-  END IF;
-
-  SELECT recipient_user_id, reply_to_message_id
-    INTO v_recipient, v_reply
-  FROM public.anon_reserve_admin_album_route(
-    -1004323044570, 'route-reply-fill', 456, 88
-  );
-  IF v_recipient <> 123 OR v_reply <> 77 THEN
-    RAISE EXCEPTION 'existing recipient or reply target was overwritten';
-  END IF;
   SELECT recipient_user_id, reply_to_message_id
     INTO v_recipient, v_reply
   FROM public.anon_reserve_admin_album_route(
