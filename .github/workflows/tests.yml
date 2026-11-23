@@ -63,6 +63,8 @@ jobs:
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_album_insert_guard.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_retention_indexes.sql
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261122_anon_update_leases.sql
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO public.anon_users (telegram_user_id, alias) VALUES (987654321, 'Legacy-99') ON CONFLICT DO NOTHING"
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO public.anon_album_buffer (source_chat_id, destination_chat_id, sender_user_id, direction, media_group_id, message_id, status) VALUES (987654321, -1004323044570, 987654321, 'user_to_admin', 'legacy-processing-before-recovery', 70001, 'processing')"
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20261123_anon_album_recovery.sql
       - name: Verify migrations are safely repeatable
         run: |

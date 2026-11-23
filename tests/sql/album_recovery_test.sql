@@ -6,7 +6,15 @@ DECLARE
   v_claimed integer;
   v_status text;
   v_claimed_at timestamptz;
+  v_legacy_status text;
 BEGIN
+  SELECT status INTO v_legacy_status
+  FROM public.anon_album_buffer
+  WHERE media_group_id = 'legacy-processing-before-recovery';
+  IF v_legacy_status <> 'unknown' THEN
+    RAISE EXCEPTION 'legacy processing album was not marked unknown by the recovery migration';
+  END IF;
+
   INSERT INTO public.anon_album_buffer (
     source_chat_id, destination_chat_id, sender_user_id, direction,
     media_group_id, message_id, last_seen_at
