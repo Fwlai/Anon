@@ -2233,11 +2233,3 @@ async def shutdown():
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     await client.aclose()
-async def shutdown():
-    if BOT_TOKEN and ADMIN_ID:
-        try:
-            await technical("system.shutdown_started")
-        except Exception as exc:
-            log.error(make_log_record("system.shutdown_log_failed", "ERROR",
-                                      **exception_fields(exc)))
-    await client.aclose()
