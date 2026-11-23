@@ -12,4 +12,8 @@ A permanently rejected Telegram request is recorded as `failed`. A request with 
 
 ## Deployment order
 
-Apply the existing four migrations in their documented order, then apply `20261123_anon_album_recovery.sql`. Only then deploy the application code containing the recovery loop. The new migration is additive and repeatable; it does not contact Telegram or modify the running Render service.
+For a fresh database, apply the four `20261122_*.sql` migrations in filename order, then apply `20261123_anon_album_recovery.sql`.
+
+For the current production database, a read-only inspection on 2026-11-23 confirmed that the album tables, album RPCs, webhook lease columns, and update-lease RPCs from the first four reliability migrations already exist. Their exact filenames are not present in the Supabase migration-history list, so the history is incomplete relative to the live schema. The fifth migration's `claimed_at` column and `anon_expire_stale_albums` function are not present yet. Reconcile that history deliberately; do not assume the ledger alone describes the live schema.
+
+The earlier migrations are repeatable in CI, but they replace functions and triggers. Do not rerun them against live traffic without a controlled maintenance window. Apply the recovery migration while album workers are drained or webhook intake is paused, then deploy the application code containing the recovery loop. The migration does not contact Telegram. It changes legacy `processing` album rows without a claim timestamp to `unknown` so they cannot be replayed blindly.
