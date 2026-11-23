@@ -553,8 +553,8 @@ def header_text(alias):
     return f'<blockquote>Alias: <code>{html.escape(alias)}</code></blockquote>'
 
 
-def header_reply_markup(user):
-    uid = int(user["telegram_user_id"])
+def header_reply_markup(user, uid=None):
+    uid = int(uid if uid is not None else user["telegram_user_id"])
     return {
         "inline_keyboard": [[{
             "text": "open",
@@ -1136,7 +1136,7 @@ async def deliver_album_to_admin(m, user, reply_to=None):
                 "chat_id": ADMIN_ID,
                 "text": header_text(user["alias"]),
                 "parse_mode": "HTML",
-                "reply_markup": header_reply_markup(user),
+                "reply_markup": header_reply_markup(user, source_uid),
             })
         except Exception as exc:
             if telegram_rate_limited(exc):
@@ -1435,7 +1435,7 @@ async def relay_live(m,user,reply_to=None):
                 "chat_id":ADMIN_ID,
                 "text":header_text(user["alias"]),
                 "parse_mode":"HTML",
-                "reply_markup":header_reply_markup(user),
+                "reply_markup":header_reply_markup(user, uid),
             })
         except Exception as exc:
             if telegram_rate_limited(exc):
