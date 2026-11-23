@@ -1188,11 +1188,13 @@ async def deliver_album_to_admin(m, user, reply_to=None):
 
     if header:
         try:
+            state = await admin_state()
+            is_active = state.get("active_user_id") == source_uid
             sent_header = await tg("sendMessage", {
                 "chat_id": ADMIN_ID,
                 "text": header_text(user["alias"]),
                 "parse_mode": "HTML",
-                "reply_markup": header_reply_markup(user, source_uid),
+                "reply_markup": header_reply_markup(user, source_uid, is_active),
             })
         except Exception as exc:
             if telegram_rate_limited(exc):
