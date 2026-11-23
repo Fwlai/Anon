@@ -19,8 +19,11 @@ create table if not exists public.anon_message_map (
 
 create table if not exists public.anon_admin_sessions (
   sender_user_id bigint primary key references public.anon_users(telegram_user_id) on delete cascade,
-  last_message_at timestamptz not null default now()
+  last_message_at timestamptz not null default now(),
+  last_header_message_id bigint
 );
+alter table public.anon_admin_sessions
+  add column if not exists last_header_message_id bigint;
 
 create table if not exists public.anon_processed_updates (
   update_id bigint primary key,
