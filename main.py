@@ -1059,6 +1059,21 @@ async def relay_album_to_user(m, uid, reply_to=None):
         )
 
 
+async def release_album_before_delivery(source_uid, destination_uid, group_id, stage):
+    try:
+        await finish_album(
+            source_uid, destination_uid, group_id, status="pending"
+        )
+    except Exception as exc:
+        await technical(
+            "message.album_pre_delivery_retry_state_failed",
+            "ERROR",
+            notify_group=False,
+            stage=stage,
+            **exception_fields(exc),
+        )
+
+
 async def deliver_album_to_admin(m, user, reply_to=None):
     uid = m["from"]["id"]
     source_uid, group_id, rows = await claim_album_messages(
@@ -1080,10 +1095,16 @@ async def deliver_album_to_admin(m, user, reply_to=None):
         )
         return
 
-    sessions = await db_get(
-        "anon_admin_sessions",
-        {"sender_user_id": f"eq.{uid}", "select": "*"},
-    )
+    try:
+        sessions = await db_get(
+            "anon_admin_sessions",
+            {"sender_user_id": f"eq.{uid}", "select": "*"},
+        )
+    except Exception:
+        await release_album_before_delivery(
+            source_uid, ADMIN_ID, group_id, "admin_session_lookup"
+        )
+        raise
     now = datetime.now(timezone.utc)
     header = not sessions
     if sessions:
@@ -1269,7 +1290,13 @@ async def deliver_album_to_user(m, uid, reply_to=None):
         return
 
     message_ids = sorted(row["message_id"] for row in rows)
-    user = await get_user(uid)
+    try:
+        user = await get_user(uid)
+    except Exception:
+        await release_album_before_delivery(
+            source_uid, uid, group_id, "recipient_lookup"
+        )
+        raise
     if not user or user.get("blocked_by_admin"):
         await finish_album(source_uid, uid, group_id, status="failed")
         await react(ADMIN_ID, message_ids[-1], "👎")
