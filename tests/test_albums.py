@@ -83,6 +83,88 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
             {"source_message_id": 202, "destination_message_id": 802},
         ], "delivered")
 
+    async def test_audio_album_uses_reply_from_any_member_when_copied_to_admin(self):
+        message = {
+            "message_id": 402,
+            "from": {"id": 123},
+            "media_group_id": "audio-reply-album",
+            "audio": {"file_id": "audio-2"},
+        }
+        buffered = [
+            {"sender_user_id": 123, "direction": "user_to_admin",
+             "message_id": 401, "reply_to_message_id": None},
+            {"sender_user_id": 123, "direction": "user_to_admin",
+             "message_id": 402, "reply_to_message_id": 777},
+        ]
+        recent = main.datetime.now(main.timezone.utc).isoformat()
+
+        with (
+            patch.object(main, "claim_album_messages", new=AsyncMock(
+                return_value=(123, "audio-reply-album", buffered)
+            )),
+            patch.object(main, "db_get", new=AsyncMock(return_value=[
+                {"last_message_at": recent}
+            ])),
+            patch.object(main, "tg", new=AsyncMock(return_value=[
+                {"message_id": 901}, {"message_id": 902}
+            ])) as tg,
+            patch.object(main, "finish_album", new=AsyncMock()),
+            patch.object(main, "db_post", new=AsyncMock()),
+            patch.object(main, "technical", new=AsyncMock()),
+        ):
+            await main.deliver_album_to_admin(message, {
+                "telegram_user_id": 123, "alias": "Blue-01"
+            })
+
+        copy_call = next(
+            call for call in tg.await_args_list
+            if call.args[0] == "copyMessages"
+        )
+        self.assertEqual(
+            copy_call.args[1]["reply_parameters"],
+            {"message_id": 777, "allow_sending_without_reply": True},
+        )
+
+    async def test_audio_album_uses_reply_from_any_member_when_copied_to_user(self):
+        message = {
+            "message_id": 502,
+            "from": {"id": main.ADMIN_ID},
+            "media_group_id": "admin-audio-reply-album",
+            "audio": {"file_id": "audio-2"},
+        }
+        buffered = [
+            {"sender_user_id": 123, "direction": "admin_to_user",
+             "message_id": 501, "reply_to_message_id": None},
+            {"sender_user_id": 123, "direction": "admin_to_user",
+             "message_id": 502, "reply_to_message_id": 888},
+        ]
+
+        with (
+            patch.object(main, "claim_album_messages", new=AsyncMock(
+                return_value=(main.ADMIN_ID, "admin-audio-reply-album", buffered)
+            )),
+            patch.object(main, "get_user", new=AsyncMock(return_value={
+                "alias": "Blue-01"
+            })),
+            patch.object(main, "tg", new=AsyncMock(return_value=[
+                {"message_id": 951}, {"message_id": 952}
+            ])) as tg,
+            patch.object(main, "finish_album", new=AsyncMock()),
+            patch.object(main, "technical", new=AsyncMock()),
+        ):
+            await main.deliver_album_to_user(message, 123)
+
+        tg.assert_awaited_once_with("copyMessages", {
+            "chat_id": 123,
+            "from_chat_id": main.ADMIN_ID,
+            "message_ids": [501, 502],
+            "reply_parameters": {
+                "message_id": 888,
+                "allow_sending_without_reply": True,
+            },
+        })
+
+
     async def test_album_copy_failure_resets_buffer_and_propagates_for_retry(self):
         message = {
             "message_id": 302,
