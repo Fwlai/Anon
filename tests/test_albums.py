@@ -30,7 +30,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "finish_album", new=AsyncMock()) as finish, \
              patch.object(main, "db_post", new=AsyncMock()), \
              patch.object(main, "technical", new=AsyncMock()):
-            await main.relay_album_to_admin(message, {
+            await main.deliver_album_to_admin(message, {
                 "telegram_user_id": 123, "alias": "Blue-01"
             })
 
@@ -70,7 +70,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "get_user", new=AsyncMock(return_value={
                  "alias": "Blue-01"
              })), patch.object(main, "technical", new=AsyncMock()):
-            await main.relay_album_to_user(message, 123)
+            await main.deliver_album_to_user(message, 123)
 
         tg.assert_awaited_once_with("copyMessages", {
             "chat_id": 123,
@@ -104,7 +104,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "finish_album", new=AsyncMock()) as finish, \
              patch.object(main, "technical", new=AsyncMock()):
             with self.assertRaises(main.IntegrationError):
-                await main.relay_album_to_admin(message, {
+                await main.deliver_album_to_admin(message, {
                     "telegram_user_id": 123, "alias": "Blue-01"
                 })
 
@@ -121,16 +121,16 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(main, "db_get", new=AsyncMock(return_value=[
             {"status": "processing", "message_id": 301}
-        ])) as db_get, \
+        ])), \
              patch.object(main, "db_post", new=AsyncMock()) as db_post, \
              patch.object(main, "db_patch", new=AsyncMock()) as db_patch, \
              patch.object(main, "react_status", new=AsyncMock()) as react_status, \
              patch.object(main, "technical", new=AsyncMock()):
-            source, group_id, rows = await main.claim_album_messages(
+            source, group_id, accepted = await main.buffer_album_message(
                 message, 123, main.ADMIN_ID, "user_to_admin"
             )
 
-        self.assertEqual((source, group_id, rows), (123, "album-late", []))
+        self.assertEqual((source, group_id, accepted), (123, "album-late", False))
         db_post.assert_not_awaited()
         db_patch.assert_not_awaited()
         react_status.assert_awaited_once_with(123, 303, False)
@@ -160,7 +160,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "finish_album", new=AsyncMock()) as finish, \
              patch.object(main, "react_status", new=AsyncMock()) as react_status, \
              patch.object(main, "technical", new=AsyncMock()):
-            await main.relay_album_to_admin(message, {
+            await main.deliver_album_to_admin(message, {
                 "telegram_user_id": 123, "alias": "Blue-01"
             })
 
@@ -193,7 +193,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
              patch.object(main, "finish_album", new=AsyncMock()) as finish, \
              patch.object(main, "react_status", new=AsyncMock()), \
              patch.object(main, "technical", new=AsyncMock()):
-            await main.relay_album_to_admin(message, {
+            await main.deliver_album_to_admin(message, {
                 "telegram_user_id": 123, "alias": "Blue-01"
             })
 
@@ -238,11 +238,11 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "technical", new=AsyncMock()),
         ):
             with self.assertRaises(main.IntegrationError):
-                await main.relay_album_to_admin(message, {
+                await main.deliver_album_to_admin(message, {
                     "telegram_user_id": 123, "alias": "Blue-01"
                 })
 
-            await main.relay_album_to_admin(message, {
+            await main.deliver_album_to_admin(message, {
                 "telegram_user_id": 123, "alias": "Blue-01"
             })
 
@@ -289,7 +289,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "technical", new=AsyncMock()),
         ):
             with self.assertRaises(main.IntegrationError):
-                await main.relay_album_to_admin(message, {
+                await main.deliver_album_to_admin(message, {
                     "telegram_user_id": 123, "alias": "Blue-01"
                 })
 
@@ -324,7 +324,7 @@ class AlbumRelayTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "react_status", new=AsyncMock()) as react_status,
             patch.object(main, "technical", new=AsyncMock()) as technical,
         ):
-            await main.relay_album_to_admin(message, {
+            await main.deliver_album_to_admin(message, {
                 "telegram_user_id": 123, "alias": "Blue-01"
             })
 
